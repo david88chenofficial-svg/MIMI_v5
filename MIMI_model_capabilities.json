@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-07-23",
+  "scope": "Non-deprecated GPT-5 and later text models suitable for the Responses API.",
+  "sources": [
+    "https://developers.openai.com/api/docs/models",
+    "https://developers.openai.com/api/docs/models/all",
+    "https://developers.openai.com/api/docs/guides/latest-model"
+  ],
+  "models": [
+    {
+      "id": "gpt-5.6-sol",
+      "label": "GPT-5.6 Sol",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "label": "GPT-5.6 Terra",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "label": "GPT-5.6 Luna",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.5",
+      "label": "GPT-5.5",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.5",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "label": "GPT-5.5 Pro",
+      "category": "pro",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.5-pro",
+      "reasoning_efforts": ["medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": false,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.4",
+      "label": "GPT-5.4",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.4-pro",
+      "label": "GPT-5.4 Pro",
+      "category": "pro",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-pro",
+      "reasoning_efforts": ["medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": false
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "label": "GPT-5.4 mini",
+      "category": "mini",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-mini",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "label": "GPT-5.4 nano",
+      "category": "nano",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-nano",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "label": "GPT-5.3 Codex",
+      "category": "coding",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": false,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.2",
+      "label": "GPT-5.2",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.2",
+      "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.2-pro",
+      "label": "GPT-5.2 Pro",
+      "category": "pro",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.2-pro",
+      "reasoning_efforts": ["medium", "high", "xhigh"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": false
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5.1",
+      "label": "GPT-5.1",
+      "category": "frontier",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.1",
+      "reasoning_efforts": ["none", "low", "medium", "high"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5",
+      "label": "GPT-5",
+      "category": "legacy",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5",
+      "reasoning_efforts": ["minimal", "low", "medium", "high"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {
+        "web_search": {
+          "blocked_reasoning_efforts": ["minimal"]
+        }
+      }
+    },
+    {
+      "id": "gpt-5-pro",
+      "label": "GPT-5 Pro",
+      "category": "pro",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-pro",
+      "reasoning_efforts": ["high"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {}
+    },
+    {
+      "id": "gpt-5-mini",
+      "label": "GPT-5 mini",
+      "category": "mini",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-mini",
+      "reasoning_efforts": ["minimal", "low", "medium", "high"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {
+        "web_search": {
+          "blocked_reasoning_efforts": ["minimal"]
+        }
+      }
+    },
+    {
+      "id": "gpt-5-nano",
+      "label": "GPT-5 nano",
+      "category": "nano",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-nano",
+      "reasoning_efforts": ["minimal", "low", "medium", "high"],
+      "verbosity": ["low", "medium", "high"],
+      "capabilities": {
+        "responses": true,
+        "streaming": true,
+        "image_input": true,
+        "function_calling": true,
+        "web_search": true,
+        "structured_output": true
+      },
+      "tool_constraints": {
+        "web_search": {
+          "blocked_reasoning_efforts": ["minimal"]
+        }
+      }
+    }
+  ]
+}
+

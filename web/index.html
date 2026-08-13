@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MIMI Inputs</title>
+  <link rel="stylesheet" href="styles.css?v=7">
+  <script src="app.js?v=7" defer></script>
+</head>
+<body>
+  <div class="top-band" aria-hidden="true"></div>
+  <main class="shell">
+    <section id="voice-intake" class="voice-intake" aria-labelledby="voice-heading" hidden>
+      <div class="voice-card">
+        <p class="eyebrow">POP Phone voice intake</p>
+        <h1 id="voice-heading">Describe the tool you want MIMI to make</h1>
+        <p class="voice-copy">
+          Speak naturally into the Native Union handset. MIMI will turn your
+          recording into a clearer Markdown specification for the later agents.
+        </p>
+        <div class="voice-meter" id="voice-meter" data-state="idle" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <p id="voice-status" class="voice-status">Preparing the handset microphone...</p>
+        <p id="voice-device" class="voice-device"></p>
+        <div class="voice-timer" id="voice-timer">00:00</div>
+        <div class="voice-actions">
+          <button id="voice-start" type="button" hidden>Start listening</button>
+          <button id="voice-stop" type="button" disabled>Stop and create specification</button>
+          <button id="voice-cancel" class="secondary-button" type="button">Use files instead</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="level-selector" class="level-screen" aria-labelledby="level-heading">
+      <div class="level-intro">
+        <p class="eyebrow">MIMI agent runner</p>
+        <h1 id="level-heading">Where should MIMI begin?</h1>
+      </div>
+
+      <div class="level-grid">
+        <button class="level-card" type="button" data-level="1">
+          <span class="level-number">Level 1</span>
+          <span class="level-title">From specification</span>
+        </button>
+
+        <button class="level-card" type="button" data-level="2">
+          <span class="level-number">Level 2</span>
+          <span class="level-title">From plan</span>
+        </button>
+
+        <button class="level-card" type="button" data-level="3">
+          <span class="level-number">Level 3</span>
+          <span class="level-title">From subtasks</span>
+        </button>
+      </div>
+    </section>
+
+    <section id="workspace" hidden>
+      <header class="page-header">
+        <div class="workflow-heading">
+          <button id="change-level" class="secondary-button" type="button">&larr; Change level</button>
+          <div>
+            <p class="eyebrow" id="selected-level-label">Level 1</p>
+            <h1 id="workspace-title">From specification</h1>
+          </div>
+        </div>
+        <div class="run-state" id="run-state" data-state="idle" hidden>Idle</div>
+      </header>
+
+      <form id="input-form" class="input-form">
+        <section id="voice-result" class="voice-result level-only" data-levels="1" hidden>
+          <div>
+            <p class="eyebrow">Generated from the POP Phone</p>
+            <h2>Voice specification ready</h2>
+            <p id="voice-result-path" class="voice-result-path"></p>
+          </div>
+          <details open>
+            <summary>Review clarified specification</summary>
+            <pre id="voice-result-preview"></pre>
+          </details>
+          <button id="voice-record-again" class="secondary-button" type="button">
+            Record again
+          </button>
+        </section>
+
+        <section class="upload-grid" aria-label="Files for the selected MIMI level">
+          <label class="drop-zone level-only" data-key="spec" data-levels="1">
+            <input type="file" accept=".md,text/markdown,text/plain">
+            <span class="file-icon" aria-hidden="true">MD</span>
+            <span class="drop-title">Task specification</span>
+            <span class="required-label">Required</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+
+          <label class="drop-zone level-only" data-key="background" data-levels="1">
+            <input type="file" accept=".md,text/markdown,text/plain">
+            <span class="file-icon" aria-hidden="true">BG</span>
+            <span class="drop-title">Background</span>
+            <span class="optional-label">Optional</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+
+          <label class="drop-zone level-only" data-key="plannerOutput" data-levels="2">
+            <input type="file" accept=".json,.txt,application/json,text/plain">
+            <span class="file-icon" aria-hidden="true">PLAN</span>
+            <span class="drop-title">Plan</span>
+            <span class="required-label">Required</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+
+          <label class="drop-zone level-only" data-key="taskBreaker" data-levels="3">
+            <input type="file" accept=".json,application/json">
+            <span class="file-icon" aria-hidden="true">JSON</span>
+            <span class="drop-title">Subtasks JSON</span>
+            <span class="required-label">Required</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+
+          <label class="drop-zone level-only" data-key="subtaskFiles" data-levels="3">
+            <input type="file" accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple>
+            <span class="file-icon" aria-hidden="true">TASK</span>
+            <span class="drop-title">Task files</span>
+            <span class="optional-label">When needed</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+
+          <label class="drop-zone level-only" data-key="image" data-levels="1,2,3">
+            <input type="file" accept="image/*" multiple>
+            <span class="file-icon" aria-hidden="true">IMG</span>
+            <span class="drop-title">Images</span>
+            <span class="optional-label">Optional</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+        </section>
+
+        <section class="resume-panel level-only" data-levels="3" aria-label="Resume controls">
+          <label class="number-control">
+            Start at task
+            <input id="start-subtask" type="number" min="1" step="1" value="1">
+          </label>
+        </section>
+
+        <details class="model-panel settings-panel">
+          <summary>
+            <span>
+              <strong>Models</strong>
+            </span>
+          </summary>
+          <div class="model-grid">
+            <fieldset class="agent-settings" data-agent="planner">
+              <legend>Planner</legend>
+              <label>Model <select data-model-agent="planner"></select></label>
+              <label>Reasoning <select data-setting-agent="planner" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="planner" data-setting-name="verbosity"></select></label>
+            </fieldset>
+            <fieldset class="agent-settings" data-agent="supervisor">
+              <legend>Supervisor</legend>
+              <label>Model <select data-model-agent="supervisor"></select></label>
+              <label>Reasoning <select data-setting-agent="supervisor" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="supervisor" data-setting-name="verbosity"></select></label>
+            </fieldset>
+            <fieldset class="agent-settings" data-agent="task_breaker">
+              <legend>Task Breaker</legend>
+              <label>Model <select data-model-agent="task_breaker"></select></label>
+              <label>Reasoning <select data-setting-agent="task_breaker" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="task_breaker" data-setting-name="verbosity"></select></label>
+            </fieldset>
+            <fieldset class="agent-settings" data-agent="coder">
+              <legend>Coder</legend>
+              <label>Model <select data-model-agent="coder"></select></label>
+              <label>Reasoning <select data-setting-agent="coder" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="coder" data-setting-name="verbosity"></select></label>
+            </fieldset>
+            <fieldset class="agent-settings" data-agent="verifier">
+              <legend>Verifier</legend>
+              <label>Model <select data-model-agent="verifier"></select></label>
+              <label>Reasoning <select data-setting-agent="verifier" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="verifier" data-setting-name="verbosity"></select></label>
+            </fieldset>
+            <fieldset class="agent-settings" data-agent="coder_secretary">
+              <legend>Coder Secretary</legend>
+              <label>Model <select data-model-agent="coder_secretary"></select></label>
+              <label>Reasoning <select data-setting-agent="coder_secretary" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="coder_secretary" data-setting-name="verbosity"></select></label>
+            </fieldset>
+          </div>
+        </details>
+
+        <section id="run-controls" class="run-panel" aria-label="Run controls" hidden>
+          <p id="status">Ready</p>
+          <button id="abort-button" class="danger-button" type="button" hidden>Abort</button>
+          <button id="run-button" type="submit" disabled>Run MIMI</button>
+        </section>
+      </form>
+
+      <div id="run-results" hidden>
+        <section class="progress-card" aria-label="Progress">
+          <div class="progress-header">
+            <div>
+              <p class="panel-kicker">Progress</p>
+              <h2 id="progress-label">Starting</h2>
+            </div>
+            <div class="progress-count" id="progress-count">0 / 0</div>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+        </section>
+
+        <section class="output-grid" aria-label="Results">
+          <details class="output-panel result-only" data-levels="1,2" open>
+            <summary>Plan</summary>
+            <pre id="planner-output" class="output-text">No plan yet.</pre>
+          </details>
+
+          <details class="output-panel" open>
+            <summary>Subtasks</summary>
+            <div id="task-breaker-output" class="subtask-list">No subtasks yet.</div>
+          </details>
+
+          <details class="output-panel wide" open>
+            <summary>Code &amp; results</summary>
+            <div id="coder-output" class="coder-output">No code yet.</div>
+          </details>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

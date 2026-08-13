@@ -1,0 +1,293 @@
+\documentclass[12pt]{article}
+
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{setspace}
+\usepackage{titling}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\usepackage{enumitem}
+ \usepackage{amsmath}
+
+\singlespacing
+
+\setlength{\droptitle}{-5em}
+\renewcommand{\postauthor}{%
+  \end{tabular}\par\end{center}
+  \vspace{-5em}
+}
+
+\renewcommand{\postdate}{%
+  \par\end{center}
+  \vspace{-100em}
+}
+
+\title{Project SA1---Aircraft Wing Analysis}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section*{Summary}
+The advent of high-performance computing has radically changed the aerospace industry's approach to wing design. In the past, wing sections were based closely on one of the wide range of standard geometries for which experimental data were already available, and optimisation was via extensive wind tunnel testing. Now, most initial section design is based on numerical calculations, with experimental work appearing later in the process. The advantage of this combined approach is that the experimental data which is the backbone of any development project is still obtained, but expensive wind tunnel tests can be targeted on the most promising designs identified by the (relatively) cheap computations. This computer-based project provides an introduction to the numerical design process, in the context of two-dimensional airfoil sections. Programming experience above and beyond Part I computing coursework activities is NOT necessary.
+
+\section*{Introduction}
+
+\subsection*{Aims}
+\begin{itemize}
+\item To write a Matlab code that calculates the lift and drag on a 2D aerofoil section;
+\item to design high-efficiency aerofoil sections, using numerical calculations to guide the process;
+\item to gain an understanding of the aerodynamics of airfoils, in particular the r\^{o}le of the boundary layer in limiting performance;
+\item to obtain an appreciation of the strengths and weaknesses of CFD itself.
+\end{itemize}
+
+\subsection*{Activities}
+\textbf{Week 1:} Write a 2D potential flow panel method. Validate via comparison with analytical solutions for standard test cases. First interim report.
+
+\textbf{Week 2:} Write an integral boundary layer equation solver. Validate via comparison with theoretical and empirical results for laminar and turbulent boundary layers. Second interim report.
+
+\textbf{Weeks 3 and 4:} Combine the potential flow and boundary layer routines to produce an aerofoil analysis code. Design your own 2D aerofoil sections using calculation results to guide the process. Final report.
+
+\subsection*{Assessment}
+\begin{tabular}{ll}
+Interim Report 1 (15 marks): & Thursday, 16th May \\
+Interim Report 2 (15 marks): & Thursday, 23rd May \\
+Final Report (50 marks): & Thursday, 6th June
+\end{tabular}
+
+\subsection*{Organisation}
+In each week, eight hours are timetabled in the DPO. The nominal weekly load for a IIA project is 20 hours/week; you should therefore allow for significant additional work---on code planning, background reading and reporting---outside timetabled sessions.
+
+The DPO sessions are Thursday, 11am--1pm, Monday, 9am--11am \& 2pm--6pm. Demonstrators will be available for both morning sessions, and from 2.15--4.15 in the afternoon. Attendance at the morning sessions is mandatory, and one mark will be deducted per hour's absence. The allocated afternoon slot is not compulsory, but you should note that you may not be able to find a terminal to use in the DPO outside timetabled sessions.
+
+Participants work in pairs; once you have decided on your partner, enter your names at \texttt{www-h.eng.cam.ac.uk/help/tpl/php/airfoil}. This will allow the operators to set you up as a `group' on the system, enabling you to share files.
+
+The two interim reports will be collected at the beginning of the first project session of the following week. Late reports will be penalised at 3 marks/day. The final report is due by 4pm on Thursday, 6th June. Due to the tight Part IIA examining timetable, any reports submitted after this deadline cannot be marked, and will receive no credit. Reports should be handed in at the Fluids Group Office, Room BE2-03.
+
+\subsection*{Getting Going}
+Make sure your machine is booted up in Linux, not Windows, mode. Log in and select `start winganalysis' from the `Applications' menu. This will create a `winganalysis\_local' subdirectory and launch Matlab. It will also create an icon for the `Wing Analysis Section Generator' (wasg), which will not be needed until Weeks 3 and 4.
+
+Once you and your partner have been set up as a group, you'll find that `winganalysis\_local' has been replaced by `winganalysis\_shared'. Don't worry! Your work to date will have been moved to a folder with your CRS id, within `winganalysis\_shared'. Also here will be a `Common' folder, for joint use. You will start needing routines provided in this folder in Week 2, so it's a good idea to get into the habit of working there, rather than your personal folder, as soon as it becomes possible.
+
+You will be guided through the Week 1 and Week 2 tasks by completing a succession of specific exercises. Each will require you to write a Matlab script (select `New$\to$Script' from the Matlab Editor's `File' menu to begin one), which should be retained for the duration of the project. Exercise 1 of Week 1 awaits \ldots
+
+\section*{Week 1: The Panel Method}
+
+\subsection*{Exercise 1: Point vortex stream function}
+
+\textbf{Statement of exercise:} The stream function $\psi$ at $(x, y)$ due to a point vortex of circulation $\Gamma$, located at $(x_c, y_c)$, is given by
+\begin{equation}
+\psi(x, y) = -\frac{\Gamma}{2\pi} \log r,
+\end{equation}
+where
+\begin{equation}
+r^2 = (x - x_c)^2 + (y - y_c)^2
+\end{equation}
+Plot contours of $\psi$ in the region $-2.5 \leq x \leq 2.5$, $-2 \leq y \leq 2$, for $x_c = 0.75$, $y_c = 0.5$, $\Gamma = 3.0$.
+
+\textbf{Step (i):} write a Matlab function \texttt{psipv.m} that returns the streamfunction value for a single $(x,y)$ location. The first line of the function file should be:
+\begin{verbatim}
+function psixy = psipv(xc,yc,Gamma,x,y)
+\end{verbatim}
+Note that the natural logarithm function in Matlab is \texttt{log( )}.
+
+\textbf{Step (ii):} Write a script to generate matrices \texttt{xm}, \texttt{ym}, \texttt{psi} whose $(i,j)$th entries give the values of $x$, $y$, and $\psi$ at the $(i,j)$th grid point, i.e.
+\begin{verbatim}
+xm(i,j) = xmin + (i-1)*(xmax-xmin)/(nx-1);
+ym(i,j) = ymin + (j-1)*(ymax-ymin)/(ny-1);
+psi(i,j) = psipv(xc,yc,Gamma,xm(i,j),ym(i,j));
+\end{verbatim}
+
+The parameters \texttt{xmin}, \texttt{xmax}, \texttt{nx}, \texttt{ymin}, \texttt{ymax}, \texttt{ny}, \texttt{xc}, \texttt{yc}, \texttt{Gamma} are best set at the beginning of the script. Use \texttt{nx = 51} and \texttt{ny = 41}.
+
+\textbf{N.B.} It's a good idea to include the commands \texttt{clear} and \texttt{close all} at the beginning of this and subsequent scripts. The first deletes all the variables lying around in the workspace from whatever you did last, and the second removes all previously generated figures.
+
+\textbf{Step (iii):} Add a call to Matlab's contouring routine at the end of the script:
+\begin{verbatim}
+c = -0.4:0.2:1.2
+contour(xm,ym,psi,c)
+\end{verbatim}
+
+\textbf{Assessment materials:} (a) listing of \texttt{psipv.m}, (b) listing of script, (c) contour plot.
+
+\subsection*{Exercise 2: Reference vortex-sheet-panel stream function}
+
+The stream function $\psi$ at $(X,Y)$ due to the linear vortex-sheet panel shown in Fig.~1 is given by
+\begin{equation}
+\psi(X,Y) = \gamma_a \left[ \left(1-\frac{X}{\Delta}\right)I_0 - \frac{I_1}{\Delta} \right] + \gamma_b \left[ \frac{X}{\Delta} I_0 + \frac{I_1}{\Delta}\right],
+\end{equation}
+where
+\begin{align}
+I_0 &= -\frac{1}{4\pi} \int_0^\Delta \log\left[(l-X)^2 + Y^2\right] \, dl \nonumber \\
+&= -\frac{1}{4\pi} \left\{ X\log\left[X^2 + Y^2\right] - (X-\Delta)\log\left[(X-\Delta)^2 + Y^2\right] - 2\Delta \right. \nonumber \\
+&\quad\quad\quad + \left. 2Y\left[\tan^{-1}\left(\frac{X}{Y}\right) - \tan^{-1}\left(\frac{X-\Delta}{Y}\right)\right] \right\}
+\end{align}
+and
+\begin{align}
+I_1 &= -\frac{1}{4\pi} \int_0^\Delta (l-X)\log\left[(l-X)^2 + Y^2\right] \, dl \nonumber \\
+&= \frac{1}{8\pi} \left\{ \left[X^2 + Y^2\right]\log\left[X^2 + Y^2\right] - \left[(X-\Delta)^2 + Y^2\right]\log\left[(X-\Delta)^2 + Y^2\right] \right. \nonumber \\
+&\quad\quad\quad - \left. 2X\Delta + \Delta^2 \right\}.
+\end{align}
+
+\textbf{Statement of exercise:} Equation (1) can be written as $\psi(X,Y) = \gamma_a f_a + \gamma_b f_b$, where $f_a$ and $f_b$ are known as `influence coefficients'. Plot contours of these coefficients in the region $-2.5 \leq x \leq 2.5$, $-2 \leq y \leq 2$, for $\Delta = 1.5$. Check your result by generating the corresponding stream functions for the discretised, multiple-point-vortex approximation to the panel shown in Fig.~2.
+
+\textbf{Step (i):} write a Matlab function \texttt{refpaninf.m} that returns the influence coefficients for a single $(X,Y)$ location. The first line of the function file should be:
+\begin{verbatim}
+function [infa infb] = refpaninf(del,X,Yin)
+\end{verbatim}
+
+Here \texttt{infa} and \texttt{infb} are $f_a$ and $f_b$, and \texttt{del} is the value of $\Delta$. The input $y$ variable is \texttt{Yin} rather than \texttt{Y} because of numerical difficulties in (2) and (3) at the panel boundaries; these can be avoided by setting the following trap:
+\begin{verbatim}
+if abs(Yin) < 1e-19
+    Y = 1e-19;
+else
+    Y = Yin;
+end
+\end{verbatim}
+
+The inverse tangent function in Matlab is \texttt{atan( )}. You may also find yourself needing to write expressions that span multiple lines in your file. Put the continuation marker \texttt{...} at the end of the line to tell Matlab that the expression continues on the following one.
+
+\textbf{Step (ii):} write a script to generate matrices of $x$, $y$ and influence coefficient values on a uniform grid, as in Example 1. Use the same number of grid points and set \texttt{del = 1.5}.
+
+\textbf{Step (iii):} produce contour plots of \texttt{infa} and \texttt{infb}, with contour levels defined by the vector \texttt{c = -0.15:0.05:0.15}. (To avoid replacing the first plot with the second, bring up another figure window with the command \texttt{figure(2)} before contouring \texttt{infb}.)
+
+\textbf{Step (iv):} edit your script to include the discretised panel estimates of the stream function at each grid point. This will entail looping over all the point vortices shown in Fig.~2, and adding the individual contributions calculated by \texttt{psipv} together to give the overall panel contribution. Use $n_v = 100$ vortices.
+
+\textbf{Step (v):} generate contour plots of the approximated influence coefficients, for comparison with your \texttt{refpaninf} results.
+
+\textbf{Assessment materials:} (a) listing of \texttt{refpaninf.m}, (b) listing of script, (c) four contour plots, showing exact and approximate values of $f_a$, $f_b$.
+
+\subsection*{Exercise 3: General vortex-sheet-panel stream function}
+
+\textbf{Statement of exercise:} The linear vortex-sheet panel shown in Fig.~3 has a general location specified by its edge coordinates, $(x_a,y_a)$ and $(x_b,y_b)$. For the case $(x_a,y_a) = (4.1,1.3)$, $(x_b,y_b) = (2.2,2.9)$, plot contours of the influence coefficients in the region $0 \leq x \leq 5$, $0 \leq y \leq 4$. Compare your plots against the corresponding results for a discretised, multiple-point-vortex representation of the panel, with the same resolution as you used in Example 2.
+
+\textbf{Step (i):} write the Matlab routine defined by
+\begin{verbatim}
+function [infa infb] = panelinf(xa,ya,xb,yb,x,y)
+\end{verbatim}
+
+This routine is to return the influence coefficients $f_a$, $f_b$ at $(x,y)$ due to our general panel. The first stage is to work out the coordinates of $(x,y)$ in the standard panel reference frame. Calculate the unit vectors tangential and normal to the panel, $\mathbf{t}$ and $\mathbf{n}$. Then evaluate $X = \mathbf{r} \cdot \mathbf{t}$, $Y = \mathbf{r} \cdot \mathbf{n}$. The desired coefficients now follow straightforwardly from the second stage: a call to \texttt{refpaninf}.
+
+\textbf{Step (ii):} edit (a copy of) the script you used for Exercise 2 to generate the required contour plots.
+
+\textbf{Assessment materials:} (a) listing of \texttt{panelinf.m}, (b) listing of script, (c) four contour plots, showing exact and approximate values of $f_a$, $f_b$.
+
+\subsection*{Exercise 4: Cylinder flow streamlines}
+
+\textbf{Statement of exercise:} Plot streamlines of the flow past a cylinder of unit radius, in the region $-2.5 \leq x \leq 2.5$, $-2 \leq y \leq 2$.
+
+\textbf{Step (i):} define the cylinder panels. For $n_p$ panels, you can generate a set of equispaced angles with \texttt{theta = (0:np)*2*pi/np} and then use the formulae \texttt{xs(i) = cos(theta(i))}, \texttt{ys(i) = sin(theta(i))} to create arrays of $x$ and $y$ coordinates. (Note that the point $(1,0)$ should be repeated as the first and $(n_p+1)$'th elements of these arrays.) For this exercise use $n_p = 100$.
+
+\textbf{Step (ii):} define the vortex sheet strength at the panel edges, using $\gamma = -2\sin\theta$. (This corresponds to the cylinder surface velocity for the case of a unit free-stream velocity in the positive $x$ direction.)
+
+\textbf{Step (iii):} loop over $x$ and $y$ locations (indexed as previously, with the same grid resolution), setting the free-stream contribution to the stream function:
+\begin{verbatim}
+psi(i,j) = ym(i,j);
+\end{verbatim}
+
+\textbf{Step (iv):} include a further, nested loop to add each panel's contribution to the streamfunction, $\gamma_a f_a + \gamma_b f_b$, using \texttt{panelinf} to provide the influence coefficients.
+
+\textbf{Step (v):} plot contours of your completed streamfunction at levels defined by \texttt{c = -1.75:0.25:1.75}. You can also, if you wish, add the cylinder as follows:
+\begin{verbatim}
+hold on
+plot(xs,ys)
+hold off
+\end{verbatim}
+
+Here the \texttt{hold} command tells Matlab to overlay the new plot on the current figure, rather than replace it.
+
+\textbf{Assessment materials:} (a) listing of script, (b) streamline plot.
+
+\subsection*{Exercise 5: Panel method solution for the cylinder flow}
+
+\textbf{Statement of exercise:} Implement a panel method and solve for the flow past a unit radius cylinder at incidences $\alpha = 0$, $\alpha = 0.1$, subject to the condition that the surface vortex sheet has zero strength at the point $(1,0)$.
+
+\subsubsection*{Panel method formulation}
+
+First, observe the nomenclature specified in Fig.~4. The panels are numbered anti-clockwise from the `trailing edge', $(1,0)$. The $ip$'th panel is defined by the $ip$'th and $(ip+1)$'th coordinate pair, $(x_{ip}, y_{ip})$ and $(x_{ip+1}, y_{ip+1})$.
+
+The contribution to the stream function from this panel is $\gamma_{ip} f_a^{(ip)} + \gamma_{ip+1} f_b^{(ip)}$, where the influence coefficients now have a superscript to indicate their associated panel, while $\gamma_a$ and $\gamma_b$ have been replaced by $\gamma_{ip}$ and $\gamma_{ip+1}$. The contribution of all the panels to the stream function at one of the panel edges, $(x_i, y_i)$, is thus
+\begin{equation}
+\psi_p(x_i, y_i) = \sum_{ip=1}^{n_p} \left[ \gamma_{ip} f_a^{(ip)}(x_i, y_i) + \gamma_{ip+1} f_b^{(ip)}(x_i, y_i) \right].
+\end{equation}
+
+(Note that, as for the surface coordinates, the trailing-edge value for the vortex sheet strength, $\gamma_1$, is repeated as $\gamma_{n_p+1}$.) We can rearrange this expression as follows:
+\begin{equation}
+\psi_p(x_i, y_i) = \sum_{j=1}^{n_p+1} [\Psi_p]_{i,j} \gamma_j,
+\end{equation}
+where
+\begin{align}
+[\Psi_p]_{i,j} &= f_a^{(j)}(x_i, y_i), \quad j = 1; \nonumber \\
+&= f_a^{(j)}(x_i, y_i) + f_b^{(j-1)}(x_i, y_i), \quad j = 2,3,\ldots,n_p; \nonumber \\
+&= f_b^{(j-1)}(x_i, y_i), \quad j = n_p + 1.
+\end{align}
+
+This alternative formulation expresses $\psi_p(x_i, y_i)$ as the product of the $i$'th row of a matrix $\Psi_p$ with the column vector of vortex sheet strength values. Finally, the overall stream function $\psi$ is given by $\psi_p + \psi_{fs}$ where $\psi_{fs}$ is the free stream contribution.
+
+We can now assemble the set of equations required to solve for the unknown $\gamma_j$s. The condition that the cylinder surface is a streamline requires the stream function to be constant from panel edge to panel edge, i.e.
+\begin{equation}
+\psi(x_{i+1}, y_{i+1}) - \psi(x_i, y_i) = 0,
+\end{equation}
+for $i$ between 1 and $n_p - 1$. (Why can't we use the last panel as well?) Splitting the stream function into its (unknown) panel component and its (known) free-stream component, and using (4), we have
+\begin{equation}
+\sum_{j=1}^{n_p+1} \left\{ [\Psi_p]_{i+1,j} - [\Psi_p]_{i,j} \right\} \gamma_j = \psi_{fs}(x_i, y_i) - \psi_{fs}(x_{i+1}, y_{i+1}),
+\end{equation}
+
+This gives us $n_p - 1$ equations for the $n_p + 1$ unknown $\gamma_j$s. The final equations are supplied by the repetition $\gamma_{n_p+1} = \gamma_1$, and by the additional requirement on the vortex sheet strength at $(1,0)$, i.e.\ $\gamma_1 = 0$. (Once we start working with aerofoil geometries this will become our Kutta condition.) We thus complete our system of equations with two auxiliary relations:
+\begin{align}
+\gamma_1 &= 0, \\
+\gamma_{n_p+1} &= 0.
+\end{align}
+
+Equations (6)--(8) can be written as
+\begin{equation}
+\mathbf{A}\boldsymbol{\gamma} = \mathbf{b},
+\end{equation}
+where $\mathbf{A}$ is an $(n_p+1) \times (n_p+1)$ matrix, $\boldsymbol{\gamma}$ is the vector of unknown $\gamma_{ip}$s, and $\mathbf{b}$ contains the stream function contributions. The solution is
+\begin{equation}
+\boldsymbol{\gamma} = \mathbf{A}^{-1}\mathbf{b}.
+\end{equation}
+
+\textbf{Step (i):} write the Matlab routine
+\begin{verbatim}
+function lhsmat = build_lhs(xs,ys)
+\end{verbatim}
+to assemble the matrix $\mathbf{A}$. The first stage in this routine is to identify the number of panels and initialize the intermediate matrix $\Psi_p$:
+\begin{verbatim}
+np = length(xs) - 1;
+psip = zeros(np,np+1);
+\end{verbatim}
+
+Next, loop over the panel edge points, each of which corresponds to a row of $\Psi_p$, and fill the rows according to equations (5). Note that this will entail an inner loop, over panels, inside which you will need to call \texttt{panelinf} to obtain the influence coefficients needed to augment the appropriate entries in the matrix.
+
+You can now build $\mathbf{A}$. Again, it should first be initialised:
+\begin{verbatim}
+lhsmat = zeros(np+1,np+1);
+\end{verbatim}
+
+If you can't see how to define its elements, go back to (9) and make sure you understand, in detail, how it follows from (6)--(8).
+
+\textbf{Step (ii):} Write the Matlab routine
+\begin{verbatim}
+function rhsvec = build_rhs(xs,ys,alpha)
+\end{verbatim}
+to assemble the vector $\mathbf{b}$ in (9). You should first initialize $\mathbf{b}$ similarly to $\mathbf{A}$ in step (i), to ensure that you return a column, rather than row, vector. The entries then follow from (6), (7) and (8). Note that the stream function for the oncoming (unit) flow at incidence $\alpha$ is
+\begin{equation}
+\psi_{fs}(x, y) = y\cos\alpha - x\sin\alpha.
+\end{equation}
+
+\textbf{Step (iii):} write a script to perform the calculations. Your code from Exercise 4 will provide a useful starting point here. Once the flow incidence and cylinder geometry are defined, the commands
+\begin{verbatim}
+A = build_lhs(xs,ys);
+b = build_rhs(xs,ys,alpha);
+gam = A\b;
+\end{verbatim}
+will solve the equations.
+
+\textbf{Step (iv):} add an output stage to your script. This should consist of a calculation of the total cylinder circulation and a plot of the surface velocity (ie \texttt{gam}) against $\theta/\pi$. Use the command \texttt{axis([0 2 -2.5 2.5])} to ensure that your plots are on the same scale.
+
+\textbf{Assessment materials:} (a) listings of \texttt{build\_lhs.m} and \texttt{build\_rhs.m}, (b) listing of script, (c) plots of surface velocities for the two requested values of $\alpha$, (d) value of circulation for the non-zero value of $\alpha$.
+
+\subsection*{Reporting}
+Your first interim report, on the work in Week 1, is due at 11am on Thursday, 16th May. It should consist solely of the assessment materials for Exercises 1--5, in order and securely bound together. (If your code structure involves auxiliary functions, include listings of these too.) Only one report per project pair is required.
