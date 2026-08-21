@@ -1,4 +1,5 @@
 import base64
+import json
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +44,39 @@ class MIMIInputBundle:
     def load_background(self) -> str:
         if not self.background_path:
             return ""
-        return self.background_path.read_text(encoding="utf-8")
+        text = self.background_path.read_text(encoding="utf-8")
+        if self.background_path.suffix.lower() != ".json":
+            return text
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Background JSON is invalid at line {exc.lineno}, column {exc.colno}: "
+                f"{self.background_path}"
+            ) from exc
+        if not isinstance(payload, (dict, list)):
+            raise ValueError("Background JSON must contain a top-level object or array.")
+        guidance = ""
+        schema_version = payload.get("schema_version", "") if isinstance(payload, dict) else ""
+        if isinstance(schema_version, str) and schema_version.startswith("mimi.predicates."):
+            guidance = (
+                "Treat each fact as a proposition reported by its source, not as independently "
+                "verified truth. Apply a fact or equation only when its listed assumptions hold. "
+                "For quantitative predicates, use the LaTeX equation and variable definitions "
+                "together, preserve their units, and retain the supplied source locators in any "
+                "analysis that relies on them. "
+            )
+            if payload.get("selection_mode") == "task_specific":
+                guidance += (
+                    "This database was relevance-filtered for the task specification identified "
+                    "in its metadata; do not assume it is complete for unrelated tasks. "
+                )
+            guidance += "\n\n"
+        return (
+            "STRUCTURED BACKGROUND KNOWLEDGE (JSON)\n"
+            + guidance
+            + json.dumps(payload, indent=2, ensure_ascii=False)
+        )
 
     def image_b64(self) -> str:
         if not self.image_path:
@@ -78,4 +111,3 @@ def build_prompt_with_reference_image(text: str, bundle: MIMIInputBundle):
         "role": "user",
         "content": content,
     }]
-

@@ -57,12 +57,23 @@ def fresh_launch_url(port, *, source=None):
     return f"http://localhost:{port}/?launch={uuid.uuid4().hex}{source_query}"
 
 
+def exit_without_lingering_workers(exit_code):
+    """Exit after cleanup without waiting for third-party non-daemon threads."""
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError):
+            pass
+    os._exit(int(exit_code))
+
+
 def main(*, pop_phone=False):
     if not WEB_DIR.exists():
         print(f"Could not find web folder: {WEB_DIR}", file=sys.stderr)
         return 1
 
-    from MIMI import request_abort, run_bundle_in_background
+    from MIMI import mark_active_run_terminated, request_abort, run_bundle_in_background
     from MIMI_dashboard import serve_web
 
     port = find_free_port(START_PORT)
@@ -97,6 +108,10 @@ def main(*, pop_phone=False):
     else:
         print("MIMI page closed. Server stopped.")
     finally:
+        mark_active_run_terminated(
+            "aborted",
+            "The MIMI launcher stopped before the active run completed.",
+        )
         clear_server_state(os.getpid())
 
     return 0
@@ -109,5 +124,4 @@ if __name__ == "__main__":
         action="store_true",
         help="open MIMI in Native Union POP Phone voice-intake mode",
     )
-    raise SystemExit(main(pop_phone=parser.parse_args().pop_phone))
-
+    exit_without_lingering_workers(main(pop_phone=parser.parse_args().pop_phone))

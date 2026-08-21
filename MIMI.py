@@ -1,25 +1,30 @@
-from MIMI_agents import (
-    Coder_agent,
-    Verifier_agent,
-    ConversationSupervisor_agent,
-    Planner_agent,
-    Coder_secretary,
-)
-import asyncio
+"""MIMI orchestration entry point.
+
+The harness owns paths and state.  Agents define plans, structured tasks,
+documentation, and scientific verdicts; Codex edits the real product workspace.
+"""
+
+from __future__ import annotations
+
 import argparse
-from contextlib import contextmanager
-import os
-import shutil
+import asyncio
+import base64
+import json
+import mimetypes
 import sys
 import threading
-from agents import Runner
 from datetime import datetime
-import time
-import json
 from pathlib import Path
-import MIMI_functions as mf
+from typing import Any
+
+from agents import Runner
+from openai_codex import AsyncCodex, CodexConfig
+
+from MIMI_agents import Documentation_agent, Planner_agent, VerificationResult, Verifier_agent
+from MIMI_codex import CodexTaskSession, review_root_cause
 from MIMI_credentials import configure_openai_api_key
 from MIMI_dashboard import (
+    add_activity,
     add_coder_run,
     append_planner_output,
     artifact_snapshot,
@@ -27,18 +32,17 @@ from MIMI_dashboard import (
     serve_web,
     set_progress,
     task_breaker_payload_to_subtasks,
+    update_subtask_status,
     update_web_state,
 )
-from MIMI_inputs import (
-    MIMIInputBundle,
-    build_prompt_with_reference_image,
-    default_input_bundle,
-)
+from MIMI_inputs import MIMIInputBundle, build_prompt_with_reference_image, default_input_bundle
 from MIMI_models import (
-    OPENAI_MODEL_OPTIONS,
     AgentModelConfig,
     apply_agent_models,
+    model_options_for_agent,
     restore_agent_models,
+    selected_model,
+    selected_settings,
 )
 from MIMI_revision import (
     build_failure_report,
@@ -47,13 +51,31 @@ from MIMI_revision import (
     run_task_breaker_on_plan,
     stream_text_response,
 )
+from MIMI_workspace import (
+    RunPaths,
+    WorkspaceContractError,
+    build_code_index,
+    collect_artifacts,
+    copy_input,
+    initialize_workspace,
+    materialize_tasks,
+    read_json,
+    render_code_index,
+    resolve_entrypoint,
+    run_workspace_entrypoint,
+    sha256_file,
+    source_bundle,
+    write_json,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AGENTS_OUTPUT_ROOT = PROJECT_ROOT / "agents_output"
 RUN_CONTROL_LOCK = threading.Lock()
+RUN_MANIFEST_LOCK = threading.Lock()
 ACTIVE_RUN_LOOP = None
 ACTIVE_RUN_TASK = None
+ACTIVE_RUN_ROOT: Path | None = None
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -61,105 +83,17 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
-def safe_output_name(value: str | None, fallback: str) -> str:
-    name = Path(str(value or "").strip()).name
-    return fallback if name in {"", ".", ".."} else name
-
-
-def unique_python_output_path(raw_filename: str, subtask_number: int, attempt_number: int) -> Path:
-    filename = safe_output_name(raw_filename, f"subtask_{subtask_number}.py")
-    candidate = Path.cwd() / filename
-    if candidate.suffix.lower() != ".py":
-        candidate = candidate.with_suffix(".py")
-
-    if not candidate.exists():
-        return candidate
-
-    stem = candidate.stem
-    suffix = candidate.suffix
-    parent = candidate.parent
-    attempt_candidate = parent / f"{stem}_subtask{subtask_number}_attempt{attempt_number}{suffix}"
-    if not attempt_candidate.exists():
-        return attempt_candidate
-
-    index = 2
-    while True:
-        numbered_candidate = parent / f"{stem}_subtask{subtask_number}_attempt{attempt_number}_{index}{suffix}"
-        if not numbered_candidate.exists():
-            return numbered_candidate
-        index += 1
-
-
-def unique_manifest_filename(filename: str, used_filenames: set[str], prefix: str) -> str:
-    path = Path(safe_output_name(filename, f"{prefix}.txt"))
-    if not path.suffix:
-        path = path.with_suffix(".txt")
-    candidate = path
-    index = 2
-    while candidate.name in used_filenames:
-        candidate = path.with_name(f"{path.stem}_{prefix}_{index}{path.suffix}")
-        index += 1
-    used_filenames.add(candidate.name)
-    return candidate.name
-
-
-def find_task_source(filename: str, source_dirs: list[Path]) -> Path | None:
-    safe_name = safe_output_name(filename, "subtask.txt")
-    candidates = [Path.cwd() / safe_name]
-    candidates.extend(source_dir / safe_name for source_dir in source_dirs)
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
-
-    if AGENTS_OUTPUT_ROOT.is_dir():
-        archived_matches = sorted(
-            AGENTS_OUTPUT_ROOT.glob(f"*/{safe_name}"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        if archived_matches:
-            return archived_matches[0].resolve()
-    return None
-
-
-def ensure_unique_task_filenames(
-    tasks: list[dict],
-    used_filenames: set[str],
-    prefix: str,
-    source_dirs: list[Path] | None = None,
-) -> list[dict]:
-    source_dirs = [Path(path).resolve() for path in (source_dirs or [])]
-    normalized_tasks = []
-    for index, task in enumerate(tasks, start=1):
-        if not isinstance(task, dict):
-            normalized_tasks.append(task)
-            continue
-        task = dict(task)
-        original_filename = safe_output_name(
-            task.get("sub_filename"),
-            f"{prefix}_{index}.txt",
-        )
-        unique_filename = unique_manifest_filename(
-            original_filename,
-            used_filenames,
-            f"{prefix}_{index}",
-        )
-        source_path = find_task_source(original_filename, source_dirs)
-        destination_path = Path.cwd() / unique_filename
-        if source_path and source_path != destination_path.resolve() and not destination_path.exists():
-            shutil.copy2(source_path, destination_path)
-        task["sub_filename"] = unique_filename
-        normalized_tasks.append(task)
-    return normalized_tasks
+def write_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    with RUN_MANIFEST_LOCK:
+        write_json(path, manifest)
 
 
 def resolve_bundle_paths(bundle: MIMIInputBundle, base_dir: Path) -> MIMIInputBundle:
     def resolve(path: Path | None) -> Path | None:
         if path is None:
             return None
-        path = Path(path).expanduser()
-        return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+        expanded = Path(path).expanduser()
+        return expanded.resolve() if expanded.is_absolute() else (base_dir / expanded).resolve()
 
     bundle.spec_path = resolve(bundle.spec_path)
     bundle.background_path = resolve(bundle.background_path)
@@ -170,30 +104,305 @@ def resolve_bundle_paths(bundle: MIMIInputBundle, base_dir: Path) -> MIMIInputBu
     return bundle
 
 
-def create_run_output_directory(timestamp: str) -> Path:
-    AGENTS_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    output_dir = AGENTS_OUTPUT_ROOT / timestamp
-    suffix = 2
-    while output_dir.exists():
-        output_dir = AGENTS_OUTPUT_ROOT / f"{timestamp}_{suffix}"
-        suffix += 1
-    output_dir.mkdir()
-    return output_dir.resolve()
+def _copy_run_inputs(bundle: MIMIInputBundle, paths: RunPaths) -> None:
+    legacy_task_files: list[Path] = []
+    if bundle.resume_task_breaker_path:
+        manifest_source = Path(bundle.resume_task_breaker_path).resolve()
+        try:
+            raw_manifest = json.loads(manifest_source.read_text(encoding="utf-8"))
+            payload = raw_manifest[0] if isinstance(raw_manifest, list) and raw_manifest else raw_manifest
+            if isinstance(payload, dict):
+                for task in payload.get("tasks", []):
+                    if not isinstance(task, dict) or task.get("instructions"):
+                        continue
+                    name = Path(str(task.get("sub_filename") or "")).name
+                    candidate = manifest_source.parent / name
+                    if name not in {"", ".", ".."} and candidate.is_file():
+                        legacy_task_files.append(candidate)
+        except (OSError, ValueError, json.JSONDecodeError):
+            # _prepare_tasks emits the user-facing manifest validation error.
+            pass
+
+    bundle.spec_path = copy_input(bundle.spec_path, paths.inputs, "spec")
+    bundle.background_path = copy_input(bundle.background_path, paths.inputs, "background")
+    copied_images = [
+        copy_input(image_path, paths.inputs, f"reference_{index}")
+        for index, image_path in enumerate(bundle.image_paths or [], start=1)
+    ]
+    bundle.image_paths = [path for path in copied_images if path is not None]
+    bundle.image_path = bundle.image_paths[0] if bundle.image_paths else None
+    bundle.resume_plan_path = copy_input(bundle.resume_plan_path, paths.inputs, "resume_plan")
+    bundle.resume_task_breaker_path = copy_input(
+        bundle.resume_task_breaker_path, paths.inputs, "resume_tasks"
+    )
+    for task_file in legacy_task_files:
+        destination = paths.inputs / task_file.name
+        destination.write_bytes(task_file.read_bytes())
 
 
-@contextmanager
-def working_directory(path: Path):
-    previous_directory = Path.cwd()
-    os.chdir(path)
+def _agent_tokens(result: Any) -> int:
+    total = 0
+    for response in getattr(result, "raw_responses", []) or []:
+        usage = getattr(response, "usage", None)
+        total += int(getattr(usage, "total_tokens", 0) or 0)
+    return total
+
+
+async def _await_with_activity(
+    awaitable,
+    *,
+    agent: str,
+    message: str,
+    task_id: str | None = None,
+    attempt: int | None = None,
+    interval_seconds: float = 30.0,
+):
+    """Await a long agent call while proving liveness in the GUI and terminal."""
+
+    future = asyncio.ensure_future(awaitable)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     try:
-        yield
-    finally:
-        os.chdir(previous_directory)
+        while True:
+            done, _ = await asyncio.wait({future}, timeout=interval_seconds)
+            if future in done:
+                return await future
+            elapsed = max(1, int(loop.time() - started))
+            add_activity(
+                agent,
+                f"{message} ({elapsed}s elapsed)",
+                status="running",
+                task_id=task_id,
+                attempt=attempt,
+            )
+    except BaseException:
+        if not future.done():
+            future.cancel()
+        await asyncio.gather(future, return_exceptions=True)
+        raise
+
+
+def _task_text(task: dict[str, Any]) -> str:
+    return str(task.get("instructions") or "").strip()
+
+
+def _verifier_json(result: VerificationResult) -> str:
+    return result.model_dump_json(indent=2)
+
+
+def _synthetic_failure(message: str, relevant_files: list[str] | None = None) -> VerificationResult:
+    return VerificationResult(
+        verdict="fail",
+        key_numbers=[],
+        key_equations=[],
+        insights=["The deterministic execution or artifact contract failed before physics validation."],
+        predicted_properties=[],
+        feedback=[message],
+        failure_modes=[message],
+        relevant_files=relevant_files or [],
+    )
+
+
+def _verification_prompt(task: str, artifacts) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {
+            "type": "input_text",
+            "text": (
+                "Verify these artifacts against the task contract. The harness already checked "
+                "that the manifest and paths are valid.\n\nTASK CONTRACT:\n" + task
+            ),
+        }
+    ]
+    for path, description in zip(artifacts.plot_paths, artifacts.plot_descriptions):
+        image_path = Path(path)
+        mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        content.append({"type": "input_text", "text": f"Plot: {description}"})
+        content.append(
+            {
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": f"data:{mime};base64,{encoded}",
+            }
+        )
+    for path, description in zip(artifacts.text_paths, artifacts.text_descriptions):
+        text = Path(path).read_text(encoding="utf-8", errors="replace")[:12_000]
+        content.append(
+            {
+                "type": "input_text",
+                "text": f"Text artifact: {description}\n--- BEGIN ---\n{text}\n--- END ---",
+            }
+        )
+    return [{"role": "user", "content": content}]
+
+
+def _load_annotations(paths: RunPaths) -> dict[str, dict[str, Any]]:
+    value = read_json(paths.reports / "documentation_annotations.json", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _refresh_deterministic_index(paths: RunPaths) -> dict[str, Any]:
+    index = build_code_index(paths.workspace, annotations=_load_annotations(paths))
+    write_json(paths.code_index, index)
+    return index
+
+
+async def _document_accepted_change(
+    paths: RunPaths,
+    task: dict[str, Any],
+    changed_files: list[str],
+) -> int:
+    """Enrich the deterministic code index after, and only after, acceptance."""
+
+    source_paths = [
+        relative
+        for relative in sorted(set(changed_files))
+        if relative != "AGENTS.md"
+        and (paths.workspace / relative).is_file()
+        and (paths.workspace / relative).suffix.lower()
+        in {".py", ".json", ".md", ".toml", ".yaml", ".yml"}
+    ]
+    if not source_paths:
+        _refresh_deterministic_index(paths)
+        return 0
+
+    deterministic_index = build_code_index(paths.workspace)
+    prompt = (
+        "TASK CONTRACT:\n"
+        + _task_text(task)
+        + "\n\nDETERMINISTIC INDEX:\n"
+        + render_code_index(deterministic_index)
+        + "\n\nACCEPTED CHANGED SOURCES:\n"
+        + source_bundle(paths.workspace, source_paths)
+    )
+    result = await Runner.run(Documentation_agent, prompt)
+    allowed = set(source_paths)
+    annotations = _load_annotations(paths)
+    for relative in allowed:
+        annotations.pop(relative, None)
+    for record in result.final_output.files:
+        relative = Path(record.path).as_posix().lstrip("/")
+        source_path = (paths.workspace / relative).resolve()
+        if relative not in allowed or not source_path.is_file():
+            continue
+        annotations[relative] = {
+            "sha256": sha256_file(source_path),
+            "purpose": record.purpose,
+            "public_interfaces": [item.model_dump() for item in record.public_interfaces],
+            "dependencies": record.dependencies,
+            "artifacts": record.artifacts,
+            "caveats": record.caveats,
+        }
+    write_json(paths.reports / "documentation_annotations.json", annotations)
+    _refresh_deterministic_index(paths)
+    return _agent_tokens(result)
+
+
+async def _prepare_tasks(bundle: MIMIInputBundle, paths: RunPaths) -> tuple[list[dict], str, int]:
+    token_used = 0
+    spec = bundle.load_spec()
+    knowledge = bundle.load_background()
+
+    if bundle.resume_task_breaker_path:
+        update_web_state(phase="resume", message="Loading the supplied structured task manifest.")
+        add_activity(
+            "MIMI",
+            f"Loading Level 3 task manifest {bundle.resume_task_breaker_path.name}.",
+            status="running",
+        )
+        raw = json.loads(bundle.resume_task_breaker_path.read_text(encoding="utf-8"))
+        payload = raw[0] if isinstance(raw, list) and raw else raw
+        if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
+            raise ValueError("Resume Task Breaker JSON must contain a top-level tasks list.")
+        tasks = materialize_tasks(
+            payload["tasks"],
+            paths.tasks,
+            source_dirs=[bundle.resume_task_breaker_path.parent],
+            prefix="resume_task",
+        )
+        active_plan = spec
+        update_web_state(
+            planner_output="Resume mode: Planner and Task Breaker were skipped.",
+            message=f"Loaded {len(tasks)} structured tasks.",
+        )
+        add_activity(
+            "MIMI",
+            f"Loaded {len(tasks)} tasks; Planner and Task Breaker were skipped.",
+            status="complete",
+        )
+    else:
+        if bundle.resume_plan_path:
+            active_plan = bundle.resume_plan_path.read_text(encoding="utf-8", errors="replace")
+            update_web_state(
+                phase="plan_resume",
+                planner_output=active_plan,
+                message="Planner skipped. Task Breaker is shaping the supplied plan.",
+            )
+            add_activity(
+                "MIMI",
+                f"Loaded Level 2 plan {bundle.resume_plan_path.name}; Planner was skipped.",
+                status="complete",
+            )
+        else:
+            prompt = "TASK SPECIFICATION:\n" + spec
+            if knowledge:
+                prompt += "\n\nBACKGROUND KNOWLEDGE:\n" + knowledge
+            update_web_state(phase="planner", message="Planner working.")
+            add_activity("Planner (API agent)", "Started building the implementation plan.", status="running")
+            planning = Runner.run_streamed(
+                starting_agent=Planner_agent,
+                input=build_prompt_with_reference_image(prompt, bundle),
+            )
+            await _await_with_activity(
+                stream_text_response(planning),
+                agent="Planner (API agent)",
+                message="Planner is still running",
+            )
+            active_plan = str(planning.final_output)
+            token_used += _agent_tokens(planning)
+            (paths.reports / "planner_output.md").write_text(
+                active_plan + "\n", encoding="utf-8", newline="\n"
+            )
+            update_web_state(
+                planner_output=active_plan,
+                message="Planner finished. Task Breaker is shaping structured work.",
+            )
+            add_activity("Planner (API agent)", "Finished the implementation plan.", status="complete")
+
+        update_web_state(phase="task_breaker", message="Task Breaker working.")
+        add_activity("Task Breaker (API agent)", "Started creating structured subtasks.", status="running")
+        task_breaker = await _await_with_activity(
+            run_task_breaker_on_plan(active_plan),
+            agent="Task Breaker (API agent)",
+            message="Task Breaker is still running",
+        )
+        token_used += _agent_tokens(task_breaker)
+        payload = task_breaker.final_output.model_dump()
+        tasks = materialize_tasks(payload.get("tasks", []), paths.tasks, prefix="task")
+        add_activity(
+            "Task Breaker (API agent)",
+            f"Finished with {len(tasks)} structured tasks.",
+            status="complete",
+        )
+
+    write_json(paths.tasks / "task_manifest.json", {"tasks": tasks})
+    if not tasks:
+        raise RuntimeError("Task Breaker returned no tasks.")
+    dashboard_payload = {"tasks": tasks}
+    update_web_state(
+        task_breaker={
+            "raw": json.dumps(dashboard_payload, indent=2, ensure_ascii=False),
+            "subtasks": task_breaker_payload_to_subtasks(dashboard_payload),
+        },
+        message=f"Prepared {len(tasks)} tasks in deterministic task paths.",
+    )
+    add_activity("MIMI", f"Queued {coding_task_count(tasks)} coding tasks for execution.")
+    return tasks, active_plan, token_used
 
 
 async def main(bundle: MIMIInputBundle | None = None):
     configure_openai_api_key(required=True)
-    bundle = bundle or default_input_bundle()
+    bundle = resolve_bundle_paths(bundle or default_input_bundle(), Path.cwd())
     original_models = apply_agent_models(bundle.model_config)
     try:
         return await run_pipeline(bundle)
@@ -201,634 +410,582 @@ async def main(bundle: MIMIInputBundle | None = None):
         restore_agent_models(original_models)
 
 
-async def run_pipeline(bundle: MIMIInputBundle):
+async def run_pipeline(bundle: MIMIInputBundle) -> Path:
+    global ACTIVE_RUN_ROOT
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = create_run_output_directory(timestamp)
-    bundle = resolve_bundle_paths(bundle, Path.cwd())
-    print(f"Agent output directory: {output_dir}")
+    paths = RunPaths.create(AGENTS_OUTPUT_ROOT, timestamp)
+    with RUN_CONTROL_LOCK:
+        ACTIVE_RUN_ROOT = paths.root
+    initialize_workspace(paths)
+    _copy_run_inputs(bundle, paths)
+    update_web_state(output_dir=str(paths.root))
 
-    with working_directory(output_dir):
-        await run_pipeline_in_output_directory(bundle, timestamp)
-
-    return output_dir
-
-
-async def run_pipeline_in_output_directory(bundle: MIMIInputBundle, timestamp: str):
-    # All relative files created below are contained in this run's output directory.
-    log_filename = f"Seal_{timestamp}.json"
-    sub_task_number = max(1, bundle.start_subtask_number)
-
-    # # Initialize token usage
-    token_used = 0
-
-    # User inputs
-    spec = bundle.load_spec()
-    knowledge = bundle.load_background()
-    background_section = ""
-    if knowledge:
-        background_section = "\n\nAnd this is the background knowledge that can be helpful" + knowledge
-    image_section = ""
-    if bundle.image_paths:
-        image_section = "\n\nReference figure attached. The plan should be consistent to the layout in the picture."
-    user_prompt = build_prompt_with_reference_image(
-        "This is the task specification"
-        + spec
-        + background_section
-        + image_section,
-        bundle,
-    )
-
-    if bundle.resume_task_breaker_path:
-        print("Resume mode: loading Task Breaker JSON...")
-        update_web_state(
-            phase="resume",
-            message=f"Resume mode. Loading {bundle.resume_task_breaker_path.name}.",
-            planner_output="Resume mode: Planner was skipped because a Task Breaker JSON file was provided.",
+    if bundle.start_subtask_number > 1:
+        raise ValueError(
+            "Starting after task 1 requires a prior product workspace, which this input route "
+            "does not supply. Resume from task 1 so MIMI can reconstruct owned code."
         )
-        with bundle.resume_task_breaker_path.open("r", encoding="utf-8") as task_breaker_json:
-            data = json.load(task_breaker_json)
-        payload = data[0] if isinstance(data, list) and data else data
-        if not isinstance(payload, dict) or "tasks" not in payload:
-            raise ValueError("Resume Task Breaker JSON must contain a top-level tasks list or a list with one tasks object.")
-        payload["tasks"] = ensure_unique_task_filenames(
-            payload["tasks"],
-            set(),
-            "resume_subtask",
-            source_dirs=[bundle.resume_task_breaker_path.parent, PROJECT_ROOT],
-        )
-        mf.log_sub_tasks(f"task_breaker_{timestamp}_resume.json", content=payload)
-        task_breaker_subtasks = task_breaker_payload_to_subtasks(payload)
-        update_web_state(
-            task_breaker={
-                "raw": json.dumps(payload, indent=2, ensure_ascii=False),
-                "subtasks": task_breaker_subtasks,
-            },
-            message=f"Loaded {len(task_breaker_subtasks)} subtasks. Starting at subtask {sub_task_number}.",
-        )
-        active_plan_context = spec
-    else:
-        if bundle.resume_plan_path:
-            print("Plan resume mode: loading Planner output...")
-            update_web_state(
-                phase="plan_resume",
-                message=f"Plan resume mode. Loading {bundle.resume_plan_path.name}.",
-            )
-            the_plan = bundle.resume_plan_path.read_text(encoding="utf-8", errors="replace")
-            mf.save_text_to_txt(the_plan, f"Planner_output_{timestamp}_resume.txt")
-            update_web_state(
-                planner_output=the_plan,
-                message="Planner skipped. Task Breaker starting from uploaded plan...",
-            )
-            active_plan_context = the_plan
-        else:
-            # Run Planner to generate overall plan
-            print("Planner working...")
-            update_web_state(phase="planner", message="Planner working...")
-            Planner_message = Runner.run_streamed(
-                starting_agent=Planner_agent,
-                input=user_prompt
-            )
 
-            await stream_text_response(Planner_message)
+    manifest: dict[str, Any] = {
+        "schema_version": 2,
+        "run_id": paths.root.name,
+        "status": "running",
+        "paths": {
+            "inputs": str(paths.inputs),
+            "workspace": str(paths.workspace),
+            "tasks": str(paths.tasks),
+            "artifacts": str(paths.artifacts),
+            "reports": str(paths.reports),
+            "code_index": str(paths.code_index),
+        },
+        "models": {
+            key: selected_model(bundle.model_config, key)
+            for key in ("planner", "task_breaker", "coder", "verifier", "documentation")
+        },
+        "tasks": [],
+        "token_usage": {
+            "total": 0,
+            "planning": 0,
+            "codex": 0,
+            "verifier": 0,
+            "root_cause": 0,
+            "documentation": 0,
+        },
+    }
+    write_run_manifest(paths.manifest, manifest)
+    print(f"MIMI run directory: {paths.root}")
+    add_activity("MIMI", f"Created run directory {paths.root}.")
 
-            # Log the Planner message
-            # Because this can be a very large text, we save it to a separate .txt file
-            mf.save_text_to_txt(Planner_message.final_output, f"Planner_output_{timestamp}.txt")
-            update_web_state(
-                planner_output=Planner_message.final_output,
-                message="Planner finished. Task Breaker starting...",
-            )
-
-            # Update token usage
-            token_used = Planner_message.raw_responses[0].usage.total_tokens + token_used
-            print()
-            print("token just used: ", Planner_message.raw_responses[0].usage.total_tokens)
-            print("total token used: ", token_used)
-            txt_path = Path(f"Planner_output_{timestamp}.txt")
-            with txt_path.open("r", encoding="utf-8") as f:
-                the_plan = f.read()
-            active_plan_context = the_plan
-
-        # Run Task Breaker
-        # Task Breaker should break the overall plan into sub tasks
-        # and each task into a .txt file
-        # and a JSON file that contains the information of each sub task
-        # File saved using the tool given to Task Breaker
-        print("Task Breaker working...")
-        update_web_state(phase="task_breaker", message="Task Breaker working...")
-        TaskBreaker_message = await run_task_breaker_on_plan(the_plan)
-
-        # Update token usage
-        token_used = TaskBreaker_message.raw_responses[0].usage.total_tokens + token_used
-        print()
-        print("token just used: ", TaskBreaker_message.raw_responses[0].usage.total_tokens)
-        print("total token used: ", token_used)
-
-        # Log the Task Breaker JSON message and information of sub tasks
-        payload = TaskBreaker_message.final_output.model_dump()
-        payload["tasks"] = ensure_unique_task_filenames(
-            payload.get("tasks", []),
-            set(),
-            "subtask",
-        )
-        mf.log_sub_tasks(f"task_breaker_{timestamp}.json", content=payload)
-        task_breaker_subtasks = task_breaker_payload_to_subtasks(payload)
-        update_web_state(
-            task_breaker={
-                "raw": json.dumps(payload, indent=2, ensure_ascii=False),
-                "subtasks": task_breaker_subtasks,
-            },
-            message=f"Task Breaker finished with {len(task_breaker_subtasks)} subtasks.",
-        )
-    
-    # Give it a break
-    print(1)
-    time.sleep(5)
-    print(5)
-    time.sleep(5)
-    print(10)
-
-###########################################################################################################################
-    # timestamp = "20260512_194222"
-    # token_used = 0
-    log_filename = f"Seal_{timestamp}.json"
-    start_subtask_number = max(1, bundle.start_subtask_number)
-###########################################################################################################################
-
-    tasks = payload["tasks"]
+    tasks, active_plan, token_used = await _prepare_tasks(bundle, paths)
+    manifest["token_usage"]["planning"] = token_used
+    manifest["token_usage"]["total"] = token_used
+    write_run_manifest(paths.manifest, manifest)
+    _refresh_deterministic_index(paths)
     total_coding_tasks = coding_task_count(tasks)
-    set_progress(0, total_coding_tasks, f"0 of {total_coding_tasks} coding subtasks complete")
-    completed_task_records = []
+    set_progress(0, total_coding_tasks, f"0 of {total_coding_tasks} coding tasks complete")
+
+    coder_model = selected_model(bundle.model_config, "coder")
+    coder_settings = selected_settings(bundle.model_config, "coder")
+    coder_effort = coder_settings.get("reasoning_effort")
+    if coder_effort in {None, "default", "none", "minimal", "max"}:
+        coder_effort = None
+
+    completed: list[dict[str, Any]] = []
+    completed_coding = 0
     task_index = 0
-    plan_revision_count = 0
-    max_plan_revisions = 2
+    revision_count = 0
 
-    # Search for every sub tasks in task_breaker.json
-    while task_index < len(tasks):
-        file_data = tasks[task_index]
-
-        if file_data.get("is_Coding_Team_required") != True:
-            completed_task_records.append(file_data)
-            task_index += 1
-            continue
-        if sub_task_number < start_subtask_number:
-            sub_task_number += 1
-            completed_task_records.append(file_data)
-            task_index += 1
-            continue
-
-        sub_file_name = Path(file_data["sub_filename"]).name
-
-        # Initialize iteration breaker
-        max_conversation_iteration = 3
-        is_code_correct = False
-        n = 0
-
-        # Initialize the wrong code
-        wrong_code = "wrong code"
-        err = "error"
-        attempt_records = []
-
-        print("Running sub task ", sub_task_number, " with iteration of ", n)
-        # Load the sub task file
-        sub_task_path = Path(sub_file_name)
-        if not sub_task_path.is_file():
-            raise FileNotFoundError(
-                f"Subtask file '{sub_file_name}' was not found in {Path.cwd()}. "
-                "Resume runs need the task files beside the Task Breaker JSON or in a previous agents_output run."
-            )
-        sub_task = sub_task_path.read_text(encoding="utf-8")
-        set_progress(
-            sub_task_number,
-            total_coding_tasks,
-            f"Working on subtask {sub_task_number} of {total_coding_tasks}",
-        )
-        update_web_state(
-            phase="coder",
-            message=f"Coder working on subtask {sub_task_number} of {total_coding_tasks}",
-        )
-
-        # Give it a break
-        print(1)
-        time.sleep(5)
-        print(5)
-        time.sleep(5)
-        print(10)
-
-        # To carry out the coding process requires three critirias:
-        # 1. The code should be indicated as wrong.
-        #     This is used to avoid if the code is correct but continue solving the same task.
-        # 2. The interation is under the limit.
-        #     This can make sure the agents are not solving one single task over and over again.
-        # 3. Code is required for the sub task.
-        #     Sometimes the sub task is simply a introduction.
-        while is_code_correct == False and n != max_conversation_iteration and file_data["is_Coding_Team_required"] == True:
-            attempt_number = n + 1
-            update_web_state(
-                message=(
-                    f"Coder working on subtask {sub_task_number} of {total_coding_tasks} "
-                    f"(attempt {attempt_number})"
+    async with AsyncCodex(CodexConfig(cwd=str(paths.workspace))) as codex:
+        while task_index < len(tasks):
+            task = tasks[task_index]
+            if task.get("is_Coding_Team_required") is not True:
+                add_activity(
+                    "MIMI",
+                    "Recorded this task as context only; no coding run is required.",
+                    status="complete",
+                    task_id=str(task["task_id"]),
                 )
-            )
-
-            # Create the prompt for Coder
-            # The prompt consist of the last code for last sub task and the instructions for the current sub task
-
-            # Load the sub task instructions
-            CodingTeam_prompt = (
-                "You will code in Python. You may use Python equivalent function to Matlab. "
-                "The task you will be doing is\n"
-                + sub_task
-            )
-
-            # The variable of "sub_task_number" was set to be 1 initially.
-            # If the Coder is doing the first task, "sub_task_number" will be 1.
-            # If it is not 1, then we can load the documentation for previous code.
-            if sub_task_number != 1:
-                doc_text = mf.load_documentation("documentation.json")
-                CodingTeam_prompt = (
-                    CodingTeam_prompt
-                    + "\nThis is the documentation of the code that you may find useful\n"
-                    + doc_text
+                completed.append(task)
+                manifest["tasks"].append(
+                    {"task_id": task["task_id"], "status": "context_only", "attempts": []}
                 )
+                task_index += 1
+                write_run_manifest(paths.manifest, manifest)
+                continue
 
-            # Add Coder's last trial and Verifier's feedback if it failed before
-            if n != 0:
-                CodingTeam_prompt = (
-                    CodingTeam_prompt
-                    + "\nYou did the task once and here is what you did\n"
-                    + wrong_code
-                )
-                CodingTeam_prompt = CodingTeam_prompt + "\nThe error is\n" + err
-                CodingTeam_prompt = (
-                    CodingTeam_prompt
-                    + "\nVerifier's feedback on your last trial on the task\n"
-                    + Verifier_message.final_output
-                )
-
-            CodingTeam_prompt = build_prompt_with_reference_image(CodingTeam_prompt, bundle)
-
-            # Run the Coder
-            print("Coder working...")
-            coder_message = Runner.run_streamed(
-                starting_agent=Coder_agent,
-                input=CodingTeam_prompt
-            )
-
-            await stream_text_response(coder_message)
-
-            # Save the code to a variable so that it can be reviewed by the Coder if it is wrong
-            wrong_code = coder_message.final_output
-
-            # Update token usage and log the outputs
-            token_used = coder_message.raw_responses[0].usage.total_tokens + token_used
-            print()
-            print("token just used: ", coder_message.raw_responses[0].usage.total_tokens)
-            print("total token used: ", token_used)
-            mf.log_result(
-                filename=log_filename,
-                role="Coder",
-                content=coder_message.final_output,
-            )
-            mf.log_result(
-                filename=log_filename,
-                role="Token just used",
-                content=coder_message.raw_responses[0].usage.total_tokens
-            )
-
-            # Get the filename of the python file
-            requested_py_file_title = mf.first_line_value(coder_message.final_output)
-            py_file_path = unique_python_output_path(
-                requested_py_file_title,
-                sub_task_number,
-                attempt_number,
-            )
-            py_file_title = str(py_file_path)
-            # Save the solution to a python file with consistent file names
-            py_file_path.parent.mkdir(parents=True, exist_ok=True)
-            with py_file_path.open("w", encoding="utf-8", newline="\n") as solution_file:
-                solution_file.write(coder_message.final_output)
-
-            # Run generated code in this run directory so all relative artifacts stay together.
-            Path("result.json").unlink(missing_ok=True)
-            rc, out, err, path = mf.run_code_string_locally(
-                coder_message.final_output,
-                f"{sub_task_number}_attempt{attempt_number}",
-                workdir=Path.cwd(),
-            )
-
-            # Give it a break
-            print(1)
-            time.sleep(5)
-            print(5)
-            time.sleep(5)
-            print(10)
-
-            # Show user what are the output
-            print("Saved to:", path)
-            print("Return code:", rc)
-            print("STDOUT:\n", out)
-            print("STDERR:\n", err)
-
-            # Give it time for user to see what is the output of the code
-            print(1)
-            time.sleep(5)
-            print(5)
-            time.sleep(5)
-            print(10)
-            time.sleep(5)
-            print(15)
-
-            # Keep execution and artifact-contract failures inside the existing
-            # Verifier/Coder repair loop instead of failing the whole MIMI run.
-            verification_error = ""
-            if rc != 0:
-                verification_error = err or f"Program exited with return code {rc} without a traceback."
-            if verification_error:
-                Verifier_prompt = (
-                    "The generated program did not run successfully.\n"
-                    "Task instructions:\n"
-                    + sub_task
-                    + "\n\nExecution error:\n"
-                    + verification_error
-                    + "\n\nCode:\n"
-                    + coder_message.final_output
-                )
-                run_artifacts = {"images": [], "texts": []}
-            else:
-                try:
-                    plot_paths, plot_description, text_path, text_description = mf.extract_artifact_lists(
-                        r"result.json"
-                    )
-                    missing_artifacts = [
-                        artifact_path
-                        for artifact_path in plot_paths + text_path
-                        if not Path(artifact_path).is_file()
-                    ]
-                    if missing_artifacts:
-                        raise FileNotFoundError(
-                            "result.json references missing artifacts: "
-                            + ", ".join(missing_artifacts)
-                        )
-
-                    for image_index, image_path in enumerate(bundle.image_paths or [], start=1):
-                        plot_paths.append(str(image_path))
-                        plot_description.append(f"This is uploaded reference image {image_index}.")
-                    run_artifacts = artifact_snapshot(
-                        plot_paths,
-                        plot_description,
-                        text_path,
-                        text_description,
-                    )
-                    b64_images = [mf.image_to_base64(plot_path) for plot_path in plot_paths]
-                    Verifier_prompt = mf.load_artifacts_to_prompt(
-                        b64_images,
-                        plot_description,
-                        text_path,
-                        text_description,
-                        sub_task,
-                        image_mime=bundle.image_mime(),
-                    )
-                except (OSError, ValueError, TypeError, json.JSONDecodeError) as artifact_exc:
-                    verification_error = (
-                        "The program exited successfully but violated the artifact contract: "
-                        f"{artifact_exc}"
-                    )
-                    err = verification_error
-                    run_artifacts = {"images": [], "texts": []}
-                    Verifier_prompt = (
-                        "The generated program could not be verified because its artifacts "
-                        "or result.json were invalid.\nTask instructions:\n"
-                        + sub_task
-                        + "\n\nArtifact error:\n"
-                        + verification_error
-                        + "\n\nCode:\n"
-                        + coder_message.final_output
-                    )
-
-            # Run the Verifier
-            print("Verifier working...")
-            update_web_state(
-                phase="verifier",
-                message=f"Verifier checking subtask {sub_task_number} of {total_coding_tasks}",
-            )
-            Verifier_message = await Runner.run(
-                starting_agent=Verifier_agent,
-                input=Verifier_prompt
-            )
-            print(Verifier_message.final_output)
-
-            # Update token usage and log the outputs
-            token_used = Verifier_message.raw_responses[0].usage.total_tokens + token_used
-            print()
-            print("token just used: ", Verifier_message.raw_responses[0].usage.total_tokens)
-            print("total token used: ", token_used)
-            mf.log_result(
-                filename=log_filename,
-                role="Verifier",
-                content=Verifier_message.final_output,
-            )
-            mf.log_result(
-                filename=log_filename,
-                role="Token just used",
-                content=Verifier_message.raw_responses[0].usage.total_tokens
-            )
-
-            # Check the verdict
-            print("Conversation Supervisor working...")
-            update_web_state(
-                phase="supervisor",
-                message=f"Supervisor reviewing subtask {sub_task_number} of {total_coding_tasks}",
-            )
-            ConversationSupervisor_message = await Runner.run(
-                starting_agent=ConversationSupervisor_agent,
-                input=Verifier_message.final_output
-            )
-            token_used = ConversationSupervisor_message.raw_responses[0].usage.total_tokens + token_used
-            print()
-            print("token just used: ", ConversationSupervisor_message.raw_responses[0].usage.total_tokens)
-            print("total token used: ", token_used)
-            print(ConversationSupervisor_message.final_output)
-            mf.log_result(
-                filename=log_filename,
-                role="Conversation Supervisor",
-                content=ConversationSupervisor_message.final_output
-            )
-            mf.log_result(
-                filename=log_filename,
-                role="Token just used",
-                content=ConversationSupervisor_message.raw_responses[0].usage.total_tokens
-            )
-
-            if ConversationSupervisor_message.final_output == 'correct':
-                is_code_correct = True
-            else:
-                n = n + 1
-
-            run_record = {
-                "subtask_number": sub_task_number,
-                "attempt": attempt_number,
-                "subtask": sub_task,
-                "code_path": str(py_file_title),
-                "temp_script_path": str(path),
-                "return_code": rc,
-                "stdout": out,
-                "stderr": err,
-                "coder_output": coder_message.final_output,
-                "verifier_output": Verifier_message.final_output,
-                "supervisor_output": ConversationSupervisor_message.final_output,
-                "artifacts": run_artifacts,
-            }
-            attempt_records.append({
-                "attempt": attempt_number,
-                "code_path": str(py_file_title),
-                "temp_script_path": str(path),
-                "return_code": rc,
-                "stdout": out,
-                "stderr": err,
-                "coder_output": coder_message.final_output,
-                "verifier_output": Verifier_message.final_output,
-                "supervisor_output": ConversationSupervisor_message.final_output,
-            })
-            add_coder_run(run_record)
-
-        if is_code_correct:
-            # Save solution to a .py file only after the verifier/supervisor loop accepts it.
-            accepted_py_file_path = Path(py_file_title)
-            accepted_py_file_path.parent.mkdir(parents=True, exist_ok=True)
-            with accepted_py_file_path.open("w", encoding="utf-8", newline="\n") as solution_file:
-                solution_file.write(coder_message.final_output)
-            completed_task_records.append(file_data)
-            sub_task_number = sub_task_number + 1
-            task_index += 1
+            task_number = int(task["task_number"])
+            task_id = str(task["task_id"])
+            task_text = _task_text(task)
             set_progress(
-                min(sub_task_number - 1, total_coding_tasks),
+                completed_coding,
                 total_coding_tasks,
-                f"{min(sub_task_number - 1, total_coding_tasks)} of {total_coding_tasks} coding subtasks complete",
+                f"Working on coding task {completed_coding + 1} of {total_coding_tasks}",
+            )
+            update_web_state(phase="coder", message=f"Codex is implementing {task_id}.")
+            update_subtask_status(
+                task_id,
+                "starting",
+                attempt_count=0,
+                max_attempts=bundle.max_subtask_attempts,
             )
 
-            # Update the documentation
-            print("Updating code documentation")
-            CoderSecretary_prompt = "This is the instructions\n" + sub_task
-            CoderSecretary_prompt = CoderSecretary_prompt + "\nThis is the code\n" + coder_message.final_output
-            CoderSecretary_message = await Runner.run(
-                starting_agent=Coder_secretary,
-                input=CoderSecretary_prompt
+            session = CodexTaskSession(
+                codex,
+                paths.workspace,
+                model=coder_model,
+                effort=coder_effort,
             )
-            mf.update_documentation(filename="documentation.json", content=CoderSecretary_message.final_output)
-            continue
+            attempts: list[dict[str, Any]] = []
+            task_changed: set[str] = set()
+            prior_failure = ""
+            verifier_feedback = ""
+            root_cause: dict[str, Any] | None = None
+            accepted = False
 
-        if plan_revision_count >= max_plan_revisions:
-            raise RuntimeError(
-                f"Subtask {sub_task_number} failed after {max_conversation_iteration} attempts "
-                f"and {max_plan_revisions} plan revisions."
+            for attempt_number in range(1, bundle.max_subtask_attempts + 1):
+                code_index = _refresh_deterministic_index(paths)
+                coding_status = "coding" if attempt_number == 1 else "repairing"
+                task["status"] = coding_status
+                task["attempt_count"] = attempt_number
+                task["max_attempts"] = bundle.max_subtask_attempts
+                update_subtask_status(
+                    task_id,
+                    coding_status,
+                    attempt_count=attempt_number,
+                    max_attempts=bundle.max_subtask_attempts,
+                    detail="Codex is editing the product workspace.",
+                )
+                add_activity(
+                    "Coder (Codex)",
+                    (
+                        "Started implementing the task."
+                        if attempt_number == 1
+                        else "Started a repair using the previous failure evidence."
+                    ),
+                    status="running",
+                    task_id=task_id,
+                    attempt=attempt_number,
+                )
+                if attempt_number == 1:
+                    change = await _await_with_activity(
+                        session.implement(task_text, code_index),
+                        agent="Coder (Codex)",
+                        message="Coder is still running",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+                else:
+                    # Same persistent Codex thread: it can inspect and modify its current code.
+                    change = await _await_with_activity(
+                        session.repair(
+                            task=task_text,
+                            failure=prior_failure,
+                            verifier_feedback=verifier_feedback,
+                            root_cause=root_cause,
+                        ),
+                        agent="Coder (Codex)",
+                        message="Coder repair is still running",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+                token_used += change.total_tokens
+                manifest["token_usage"]["codex"] += change.total_tokens
+                task_changed.update(change.changed_files)
+                attempt_dir = paths.attempt_dir(task_id, attempt_number)
+                update_subtask_status(
+                    task_id,
+                    "executing",
+                    attempt_count=attempt_number,
+                    max_attempts=bundle.max_subtask_attempts,
+                    detail="Running the generated entrypoint and collecting artifacts.",
+                )
+                add_activity(
+                    "Coder (Codex)",
+                    f"Finished editing {len(change.changed_files)} file(s); entrypoint is {change.entrypoint}.",
+                    status="complete",
+                    task_id=task_id,
+                    attempt=attempt_number,
+                )
+                add_activity(
+                    "Execution",
+                    f"Running {change.entrypoint} and collecting its outputs.",
+                    status="running",
+                    task_id=task_id,
+                    attempt=attempt_number,
+                )
+
+                execution = None
+                artifacts = None
+                deterministic_failure = ""
+                try:
+                    entrypoint = resolve_entrypoint(
+                        paths.workspace, change.entrypoint, sorted(task_changed)
+                    )
+                    execution = run_workspace_entrypoint(
+                        paths.workspace, entrypoint, attempt_dir
+                    )
+                    if execution.returncode != 0:
+                        deterministic_failure = (
+                            f"Entrypoint {execution.entrypoint} exited with code "
+                            f"{execution.returncode}. stderr:\n{execution.stderr[-8000:]}"
+                        )
+                    else:
+                        artifacts = collect_artifacts(attempt_dir)
+                except (OSError, ValueError, json.JSONDecodeError, WorkspaceContractError) as exc:
+                    deterministic_failure = f"{type(exc).__name__}: {exc}"
+
+                execution_status = (
+                    f"failed: {deterministic_failure.splitlines()[0]}"
+                    if deterministic_failure
+                    else f"finished with return code {execution.returncode}"
+                )
+                add_activity(
+                    "Execution",
+                    execution_status,
+                    status="failed" if deterministic_failure else "complete",
+                    task_id=task_id,
+                    attempt=attempt_number,
+                )
+
+                if deterministic_failure:
+                    verdict = _synthetic_failure(deterministic_failure, change.changed_files)
+                    verifier_tokens = 0
+                else:
+                    update_web_state(phase="verifier", message=f"Verifier checking {task_id}.")
+                    update_subtask_status(
+                        task_id,
+                        "verifying",
+                        attempt_count=attempt_number,
+                        max_attempts=bundle.max_subtask_attempts,
+                        detail="The API verifier is checking the produced artifacts.",
+                    )
+                    add_activity(
+                        "Verifier (API agent)",
+                        "Started checking the implementation and artifacts.",
+                        status="running",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+                    verification = await _await_with_activity(
+                        Runner.run(Verifier_agent, _verification_prompt(task_text, artifacts)),
+                        agent="Verifier (API agent)",
+                        message="Verifier is still running",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+                    verdict = verification.final_output
+                    verifier_tokens = _agent_tokens(verification)
+                    token_used += verifier_tokens
+                    manifest["token_usage"]["verifier"] += verifier_tokens
+                    add_activity(
+                        "Verifier (API agent)",
+                        f"Finished with verdict: {verdict.verdict}.",
+                        status="complete" if verdict.verdict == "pass" else "failed",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+
+                verifier_feedback = _verifier_json(verdict)
+                prior_failure = deterministic_failure or "\n".join(verdict.failure_modes + verdict.feedback)
+                root_cause = None
+                review_tokens = 0
+                if verdict.verdict != "pass":
+                    # A distinct read-only Codex thread sees the implementation only once a
+                    # concrete failure mode exists.
+                    update_web_state(
+                        phase="root_cause", message=f"Reviewing the failure mode in {task_id}."
+                    )
+                    update_subtask_status(
+                        task_id,
+                        "diagnosing",
+                        attempt_count=attempt_number,
+                        max_attempts=bundle.max_subtask_attempts,
+                        detail="A separate read-only Codex reviewer is diagnosing the failure.",
+                    )
+                    add_activity(
+                        "Root Cause (Codex, read-only)",
+                        "Started diagnosing the failed attempt.",
+                        status="running",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+                    root_cause, review_tokens = await _await_with_activity(
+                        review_root_cause(
+                            codex,
+                            paths.workspace,
+                            model=coder_model,
+                            effort=coder_effort,
+                            task=task_text,
+                            failure=prior_failure,
+                            verifier_feedback=verifier_feedback,
+                            changed_files=sorted(task_changed),
+                            code_index=_refresh_deterministic_index(paths),
+                        ),
+                        agent="Root Cause (Codex, read-only)",
+                        message="Root-cause review is still running",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+                    token_used += review_tokens
+                    manifest["token_usage"]["root_cause"] += review_tokens
+                    add_activity(
+                        "Root Cause (Codex, read-only)",
+                        "Finished diagnosing the failed attempt.",
+                        status="complete",
+                        task_id=task_id,
+                        attempt=attempt_number,
+                    )
+
+                artifact_view = (
+                    artifact_snapshot(
+                        artifacts.plot_paths,
+                        artifacts.plot_descriptions,
+                        artifacts.text_paths,
+                        artifacts.text_descriptions,
+                    )
+                    if artifacts
+                    else {"images": [], "texts": []}
+                )
+                attempt_record = {
+                    "attempt": attempt_number,
+                    "thread_id": change.thread_id,
+                    "changed_files": change.changed_files,
+                    "summary": change.summary,
+                    "entrypoint": change.entrypoint,
+                    "tests_run": change.tests_run,
+                    "return_code": execution.returncode if execution else None,
+                    "stdout": (execution.stdout if execution else "")[-20_000:],
+                    "stderr": (
+                        execution.stderr if execution else deterministic_failure
+                    )[-20_000:],
+                    "verdict": verdict.model_dump(),
+                    "root_cause": root_cause,
+                    "artifacts": (
+                        {
+                            "manifest_path": artifacts.manifest_path,
+                            "summary": artifacts.summary,
+                            "plots": artifacts.plot_paths,
+                            "texts": artifacts.text_paths,
+                        }
+                        if artifacts
+                        else None
+                    ),
+                    "token_usage": {
+                        "codex": change.total_tokens,
+                        "verifier": verifier_tokens,
+                        "root_cause": review_tokens,
+                    },
+                }
+                attempts.append(attempt_record)
+                add_coder_run(
+                    {
+                        "subtask_number": task_number,
+                        "attempt": attempt_number,
+                        "subtask": task_text,
+                        "code_path": change.entrypoint,
+                        "coder_output": change.summary,
+                        "verifier_output": verifier_feedback,
+                        "verifier_verdict": verdict.verdict,
+                        "return_code": attempt_record["return_code"],
+                        "stdout": attempt_record["stdout"],
+                        "stderr": attempt_record["stderr"],
+                        "artifacts": artifact_view,
+                        "root_cause": root_cause,
+                    }
+                )
+
+                if verdict.verdict == "pass":
+                    accepted = True
+                    break
+
+            if accepted:
+                update_web_state(
+                    phase="documentation",
+                    message=f"Documenting accepted changes for {task_id}.",
+                )
+                update_subtask_status(
+                    task_id,
+                    "documenting",
+                    attempt_count=len(attempts),
+                    max_attempts=bundle.max_subtask_attempts,
+                    detail="The API documentation agent is recording accepted interfaces.",
+                )
+                add_activity(
+                    "Documentation (API agent)",
+                    "Started documenting the accepted changes.",
+                    status="running",
+                    task_id=task_id,
+                )
+                documentation_tokens = await _await_with_activity(
+                    _document_accepted_change(paths, task, sorted(task_changed)),
+                    agent="Documentation (API agent)",
+                    message="Documentation is still running",
+                    task_id=task_id,
+                )
+                token_used += documentation_tokens
+                manifest["token_usage"]["documentation"] += documentation_tokens
+                task["status"] = "accepted"
+                update_subtask_status(
+                    task_id,
+                    "accepted",
+                    attempt_count=len(attempts),
+                    max_attempts=bundle.max_subtask_attempts,
+                    detail="Implementation, execution, verification, and documentation passed.",
+                )
+                add_activity(
+                    "Documentation (API agent)",
+                    "Finished documentation; task accepted.",
+                    status="complete",
+                    task_id=task_id,
+                )
+                completed.append(task)
+                completed_coding += 1
+                manifest["tasks"].append(
+                    {
+                        "task_id": task_id,
+                        "status": "accepted",
+                        "thread_id": attempts[-1]["thread_id"],
+                        "changed_files": sorted(task_changed),
+                        "documentation_tokens": documentation_tokens,
+                        "attempts": attempts,
+                    }
+                )
+                manifest["token_usage"]["total"] = token_used
+                write_run_manifest(paths.manifest, manifest)
+                task_index += 1
+                set_progress(
+                    completed_coding,
+                    total_coding_tasks,
+                    f"{completed_coding} of {total_coding_tasks} coding tasks complete",
+                )
+                continue
+
+            if revision_count >= bundle.max_plan_revisions:
+                task["status"] = "failed"
+                update_subtask_status(
+                    task_id,
+                    "failed",
+                    attempt_count=len(attempts),
+                    max_attempts=bundle.max_subtask_attempts,
+                    detail="The task exhausted its attempts and plan revisions.",
+                )
+                add_activity(
+                    "MIMI",
+                    "Task failed after exhausting its attempts and plan revisions.",
+                    status="failed",
+                    task_id=task_id,
+                )
+                manifest["status"] = "failed"
+                manifest["token_usage"]["total"] = token_used
+                manifest["tasks"].append(
+                    {"task_id": task_id, "status": "failed", "attempts": attempts}
+                )
+                write_run_manifest(paths.manifest, manifest)
+                raise RuntimeError(
+                    f"{task_id} failed after {bundle.max_subtask_attempts} attempts and "
+                    f"{bundle.max_plan_revisions} plan revisions."
+                )
+
+            revision_count += 1
+            task["status"] = "replanning"
+            update_subtask_status(
+                task_id,
+                "replanning",
+                attempt_count=len(attempts),
+                max_attempts=bundle.max_subtask_attempts,
+                detail="The API planner is revising this task and the remaining plan.",
+            )
+            add_activity(
+                "Planner (API agent)",
+                f"Started plan revision {revision_count} after the failed task.",
+                status="running",
+                task_id=task_id,
+            )
+            manifest["tasks"].append(
+                {
+                    "task_id": task_id,
+                    "status": "superseded_after_failure",
+                    "revision": revision_count,
+                    "attempts": attempts,
+                }
+            )
+            manifest["token_usage"]["total"] = token_used
+            write_run_manifest(paths.manifest, manifest)
+            failure_report = build_failure_report(
+                subtask_number=task_number,
+                subtask_text=task_text,
+                attempts=attempts,
+                completed_tasks=completed,
+                remaining_tasks=tasks[task_index:],
+            )
+            (paths.reports / f"failure_revision_{revision_count}.json").write_text(
+                failure_report, encoding="utf-8", newline="\n"
+            )
+            revision = await _await_with_activity(
+                revise_plan_continuation(
+                    bundle=bundle,
+                    original_plan=active_plan,
+                    failure_report=failure_report,
+                    failed_subtask_number=task_number,
+                    revision_number=revision_count,
+                ),
+                agent="Planner (API agent)",
+                message="Planner recovery is still running",
+                task_id=task_id,
+            )
+            token_used += _agent_tokens(revision)
+            manifest["token_usage"]["planning"] += _agent_tokens(revision)
+            revised_plan = str(revision.final_output)
+            active_plan += f"\n\n--- REVISION {revision_count} ---\n{revised_plan}"
+            append_planner_output(f"Revision {revision_count}", revised_plan)
+            add_activity(
+                "Planner (API agent)",
+                f"Finished plan revision {revision_count}.",
+                status="complete",
+                task_id=task_id,
             )
 
-        plan_revision_count += 1
-        failure_report = build_failure_report(
-            subtask_number=sub_task_number,
-            subtask_text=sub_task,
-            attempts=attempt_records,
-            completed_tasks=completed_task_records,
-            remaining_tasks=tasks[task_index:],
-        )
-        revision_report_path = Path(f"plan_revision_failure_{timestamp}_r{plan_revision_count}.json")
-        revision_report_path.write_text(failure_report, encoding="utf-8")
-        mf.log_result(
-            filename=log_filename,
-            role="Plan Revision Failure Report",
-            content=failure_report,
-        )
+            add_activity(
+                "Task Breaker (API agent)",
+                "Started creating replacement subtasks for the revised plan.",
+                status="running",
+                task_id=task_id,
+            )
+            replacement = await _await_with_activity(
+                run_task_breaker_on_plan(
+                    "Create only replacement tasks for this revised continuation.\n\n"
+                    + revised_plan
+                    + "\n\nFAILURE EVIDENCE:\n"
+                    + failure_report
+                ),
+                agent="Task Breaker (API agent)",
+                message="Task Breaker recovery is still running",
+                task_id=task_id,
+            )
+            token_used += _agent_tokens(replacement)
+            manifest["token_usage"]["planning"] += _agent_tokens(replacement)
+            raw_replacements = replacement.final_output.model_dump().get("tasks", [])
+            if not raw_replacements:
+                raise RuntimeError("Task Breaker returned no replacement tasks.")
+            replacement_tasks = materialize_tasks(
+                raw_replacements,
+                paths.tasks,
+                prefix=f"revision_{revision_count}",
+                start_number=task_number,
+            )
+            add_activity(
+                "Task Breaker (API agent)",
+                f"Created {len(replacement_tasks)} replacement tasks.",
+                status="complete",
+                task_id=task_id,
+            )
+            tasks = tasks[:task_index] + replacement_tasks
+            total_coding_tasks = completed_coding + coding_task_count(tasks[task_index:])
+            write_json(paths.tasks / "task_manifest.json", {"tasks": tasks})
+            update_web_state(
+                task_breaker={
+                    "raw": json.dumps({"tasks": tasks}, indent=2, ensure_ascii=False),
+                    "subtasks": task_breaker_payload_to_subtasks({"tasks": tasks}),
+                },
+                message=f"Replaced {task_id} and downstream tasks after revision.",
+            )
 
-        Planner_revision_message = await revise_plan_continuation(
-            bundle=bundle,
-            original_plan=active_plan_context,
-            failure_report=failure_report,
-            failed_subtask_number=sub_task_number,
-            revision_number=plan_revision_count,
-        )
-        token_used = Planner_revision_message.raw_responses[0].usage.total_tokens + token_used
-        revised_plan = Planner_revision_message.final_output
-        active_plan_context = (
-            active_plan_context
-            + "\n\n--- Scoped Planner Revision "
-            + str(plan_revision_count)
-            + " from subtask "
-            + str(sub_task_number)
-            + " ---\n"
-            + revised_plan
-        )
-        revised_plan_path = Path(f"Planner_revision_{timestamp}_r{plan_revision_count}.txt")
-        mf.save_text_to_txt(revised_plan, revised_plan_path.name)
-        append_planner_output(
-            f"Planner Revision {plan_revision_count} from subtask {sub_task_number}",
-            revised_plan,
-        )
-        update_web_state(
-            message=(
-                f"Planner revision {plan_revision_count} finished. "
-                "Task Breaker regenerating downstream subtasks."
-            ),
-        )
-
-        print("Task Breaker revising downstream tasks...")
-        update_web_state(
-            phase="task_breaker_revision",
-            message=f"Task Breaker regenerating from subtask {sub_task_number}",
-        )
-        TaskBreaker_revision_message = await run_task_breaker_on_plan(
-            "Break this revised continuation plan into replacement subtasks. "
-            f"Start numbering filenames at revised_{sub_task_number}_ and only include the failed subtask "
-            "and downstream remaining work. "
-            "Do not reuse any completed or existing sub_filename values from this failure report.\n\n"
-            "Failure report with filenames to preserve and avoid:\n"
-            + failure_report
-            + "\n\nRevised continuation plan:\n"
-            + revised_plan
-        )
-        token_used = TaskBreaker_revision_message.raw_responses[0].usage.total_tokens + token_used
-        revised_payload = TaskBreaker_revision_message.final_output.model_dump()
-        replacement_tasks = revised_payload.get("tasks", [])
-        if not replacement_tasks:
-            raise RuntimeError("Task Breaker returned no replacement tasks for the revised continuation plan.")
-        used_subtask_filenames = {
-            Path(task.get("sub_filename", "")).name
-            for task in tasks[:task_index]
-            if isinstance(task, dict) and task.get("sub_filename")
-        }
-        replacement_tasks = ensure_unique_task_filenames(
-            replacement_tasks,
-            used_subtask_filenames,
-            f"revised_{sub_task_number}",
-        )
-
-        tasks = tasks[:task_index] + replacement_tasks
-        data = [{"tasks": tasks}]
-        Path(f"task_breaker_{timestamp}_revision_{plan_revision_count}.json").write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        total_coding_tasks = (sub_task_number - 1) + coding_task_count(tasks[task_index:])
-        set_progress(
-            sub_task_number - 1,
-            total_coding_tasks,
-            f"Plan revised. Retrying subtask {sub_task_number} of {total_coding_tasks}",
-        )
-        update_web_state(
-            task_breaker={
-                "raw": json.dumps({"tasks": tasks}, indent=2, ensure_ascii=False),
-                "subtasks": task_breaker_payload_to_subtasks({"tasks": tasks}),
-            },
-            message=f"Replaced subtask {sub_task_number} and downstream tasks after planner revision.",
-        )
-
-    mf.log_result(filename=log_filename, role="Total Token Used", content=token_used)
+    manifest["status"] = "complete"
+    manifest["token_usage"]["total"] = token_used
+    write_run_manifest(paths.manifest, manifest)
+    update_web_state(
+        phase="complete",
+        message=f"MIMI completed {completed_coding} coding tasks.",
+        output_dir=str(paths.root),
+    )
+    add_activity("MIMI", f"Completed {completed_coding} coding tasks.", status="complete")
+    return paths.root
 
 
 def request_abort() -> bool:
     """Cancel the active asynchronous run from the browser UI."""
-    global ACTIVE_RUN_LOOP, ACTIVE_RUN_TASK
 
+    global ACTIVE_RUN_LOOP, ACTIVE_RUN_TASK
     with RUN_CONTROL_LOCK:
         loop = ACTIVE_RUN_LOOP
         task = ACTIVE_RUN_TASK
@@ -838,21 +995,40 @@ def request_abort() -> bool:
             loop.call_soon_threadsafe(task.cancel)
         except RuntimeError:
             return False
-
     update_web_state(phase="stopping", message="Stopping the active MIMI run.")
+    add_activity("MIMI", "Abort requested; stopping the active run.", status="running")
     return True
 
 
-def run_bundle_in_background(bundle: MIMIInputBundle) -> None:
-    global ACTIVE_RUN_LOOP, ACTIVE_RUN_TASK
+def mark_active_run_terminated(status: str, reason: str) -> Path | None:
+    """Persist a terminal status before the launcher exits forcibly."""
 
+    with RUN_CONTROL_LOCK:
+        run_root = ACTIVE_RUN_ROOT
+    if run_root is None:
+        return None
+
+    manifest_path = run_root / "run_manifest.json"
+    with RUN_MANIFEST_LOCK:
+        manifest = read_json(manifest_path, {})
+        if not isinstance(manifest, dict) or manifest.get("status") != "running":
+            return run_root
+
+        manifest["status"] = status
+        manifest["termination_reason"] = reason
+        manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        write_json(manifest_path, manifest)
+    return run_root
+
+
+def run_bundle_in_background(bundle: MIMIInputBundle) -> None:
+    global ACTIVE_RUN_LOOP, ACTIVE_RUN_TASK, ACTIVE_RUN_ROOT
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     task = loop.create_task(main(bundle))
     with RUN_CONTROL_LOCK:
         ACTIVE_RUN_LOOP = loop
         ACTIVE_RUN_TASK = task
-
     try:
         reset_web_state(f"Agents running with inputs from {bundle.spec_path.parent}")
         output_dir = loop.run_until_complete(task)
@@ -864,6 +1040,7 @@ def run_bundle_in_background(bundle: MIMIInputBundle) -> None:
             finished_at=datetime.now().isoformat(timespec="seconds"),
         )
     except asyncio.CancelledError:
+        mark_active_run_terminated("aborted", "The active run was cancelled.")
         update_web_state(
             running=False,
             phase="aborted",
@@ -871,7 +1048,9 @@ def run_bundle_in_background(bundle: MIMIInputBundle) -> None:
             finished_at=datetime.now().isoformat(timespec="seconds"),
             error=None,
         )
+        add_activity("MIMI", "Run aborted.", status="failed")
     except Exception as exc:
+        mark_active_run_terminated("failed", str(exc))
         update_web_state(
             running=False,
             phase="error",
@@ -879,13 +1058,14 @@ def run_bundle_in_background(bundle: MIMIInputBundle) -> None:
             finished_at=datetime.now().isoformat(timespec="seconds"),
             error=str(exc),
         )
+        add_activity("MIMI", f"Agent run failed: {exc}", status="failed")
         print(f"MIMI run failed: {exc}", file=sys.stderr)
     finally:
         with RUN_CONTROL_LOCK:
             if ACTIVE_RUN_TASK is task:
                 ACTIVE_RUN_LOOP = None
                 ACTIVE_RUN_TASK = None
-
+                ACTIVE_RUN_ROOT = None
         pending = [item for item in asyncio.all_tasks(loop) if not item.done()]
         for item in pending:
             item.cancel()
@@ -897,22 +1077,38 @@ def run_bundle_in_background(bundle: MIMIInputBundle) -> None:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run MIMI with configurable markdown and image inputs.")
-    parser.add_argument("--web", action="store_true", help="Start the drag-and-drop HTML interface.")
+    parser = argparse.ArgumentParser(description="Run MIMI with Codex-owned product workspaces.")
+    parser.add_argument("--web", action="store_true", help="Start the HTML interface.")
     parser.add_argument("--host", default="127.0.0.1", help="Host for --web mode.")
     parser.add_argument("--port", type=int, default=8080, help="Port for --web mode.")
-    parser.add_argument("--spec", type=Path, default=Path("seal_analysis_tool_spec_v6.md"), help="Task specification markdown path.")
-    parser.add_argument("--background", type=Path, default=Path("seal_tool_background_knowledge_short.md"), help="Optional background markdown path.")
-    parser.add_argument("--image", type=Path, default=None, help="Optional reference image path.")
-    parser.add_argument("--planner-output", type=Path, default=None, help="Optional Planner output path. Skips Planner and starts at Task Breaker.")
-    parser.add_argument("--task-breaker-json", type=Path, default=None, help="Optional Task Breaker JSON path for resume mode.")
-    parser.add_argument("--start-subtask", type=int, default=1, help="Subtask number to start from in resume mode.")
-    parser.add_argument("--planner-model", choices=OPENAI_MODEL_OPTIONS, default=None)
-    parser.add_argument("--task-breaker-model", choices=OPENAI_MODEL_OPTIONS, default=None)
-    parser.add_argument("--coder-model", choices=OPENAI_MODEL_OPTIONS, default=None)
-    parser.add_argument("--verifier-model", choices=OPENAI_MODEL_OPTIONS, default=None)
-    parser.add_argument("--supervisor-model", choices=OPENAI_MODEL_OPTIONS, default=None)
-    parser.add_argument("--coder-secretary-model", choices=OPENAI_MODEL_OPTIONS, default=None)
+    parser.add_argument("--spec", type=Path, default=Path("seal_analysis_tool_spec_v6.md"))
+    parser.add_argument(
+        "--background",
+        type=Path,
+        default=Path("seal_tool_background_knowledge_short.md"),
+        help="Optional Markdown, text, or structured JSON background-knowledge file.",
+    )
+    parser.add_argument("--image", type=Path, default=None)
+    parser.add_argument("--planner-output", type=Path, default=None)
+    parser.add_argument("--task-breaker-json", type=Path, default=None)
+    parser.add_argument("--start-subtask", type=int, default=1)
+    parser.add_argument("--max-subtask-attempts", type=int, default=3)
+    parser.add_argument("--max-plan-revisions", type=int, default=3)
+    parser.add_argument(
+        "--planner-model", choices=model_options_for_agent("planner"), default=None
+    )
+    parser.add_argument(
+        "--task-breaker-model", choices=model_options_for_agent("task_breaker"), default=None
+    )
+    parser.add_argument("--coder-model", choices=model_options_for_agent("coder"), default=None)
+    parser.add_argument(
+        "--verifier-model", choices=model_options_for_agent("verifier"), default=None
+    )
+    parser.add_argument(
+        "--documentation-model",
+        choices=model_options_for_agent("documentation"),
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -928,23 +1124,37 @@ if __name__ == "__main__":
         )
     else:
         background = args.background if args.background and args.background.exists() else None
-        model_config = AgentModelConfig({
-            "planner": args.planner_model,
-            "task_breaker": args.task_breaker_model,
-            "coder": args.coder_model,
-            "verifier": args.verifier_model,
-            "supervisor": args.supervisor_model,
-            "coder_secretary": args.coder_secretary_model,
-        })
         image = args.image if args.image and args.image.exists() else None
-        task_breaker_json = args.task_breaker_json if args.task_breaker_json and args.task_breaker_json.exists() else None
-        asyncio.run(main(MIMIInputBundle(
-            spec_path=args.spec,
-            background_path=background,
-            image_path=image,
-            image_paths=[image] if image else [],
-            resume_plan_path=args.planner_output if args.planner_output and args.planner_output.exists() else None,
-            resume_task_breaker_path=task_breaker_json,
-            start_subtask_number=max(1, args.start_subtask) if task_breaker_json else 1,
-            model_config=model_config,
-        )))
+        model_config = AgentModelConfig(
+            models={
+                "planner": args.planner_model,
+                "task_breaker": args.task_breaker_model,
+                "coder": args.coder_model,
+                "verifier": args.verifier_model,
+                "documentation": args.documentation_model,
+            }
+        )
+        asyncio.run(
+            main(
+                MIMIInputBundle(
+                    spec_path=args.spec,
+                    background_path=background,
+                    image_path=image,
+                    image_paths=[image] if image else [],
+                    resume_plan_path=(
+                        args.planner_output
+                        if args.planner_output and args.planner_output.exists()
+                        else None
+                    ),
+                    resume_task_breaker_path=(
+                        args.task_breaker_json
+                        if args.task_breaker_json and args.task_breaker_json.exists()
+                        else None
+                    ),
+                    start_subtask_number=max(1, args.start_subtask),
+                    max_subtask_attempts=args.max_subtask_attempts,
+                    max_plan_revisions=args.max_plan_revisions,
+                    model_config=model_config,
+                )
+            )
+        )

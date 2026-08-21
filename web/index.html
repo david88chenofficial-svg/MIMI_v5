@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MIMI Inputs</title>
-  <link rel="stylesheet" href="styles.css?v=7">
-  <script src="app.js?v=7" defer></script>
+  <link rel="stylesheet" href="styles.css?v=10">
+  <script src="app.js?v=13" defer></script>
 </head>
 <body>
   <div class="top-band" aria-hidden="true"></div>
@@ -95,9 +95,18 @@
           </label>
 
           <label class="drop-zone level-only" data-key="background" data-levels="1">
-            <input type="file" accept=".md,text/markdown,text/plain">
+            <input type="file" accept=".md,.txt,.json,text/markdown,text/plain,application/json">
             <span class="file-icon" aria-hidden="true">BG</span>
-            <span class="drop-title">Background</span>
+            <span class="drop-title">Background (.md, .txt, or .json)</span>
+            <span class="optional-label">Optional</span>
+            <span class="file-name">No file selected</span>
+            <span class="file-list"></span>
+          </label>
+
+          <label class="drop-zone level-only" data-key="literaturePdfs" data-levels="1">
+            <input type="file" accept=".pdf,application/pdf" multiple>
+            <span class="file-icon" aria-hidden="true">PDF</span>
+            <span class="drop-title">Literature PDFs</span>
             <span class="optional-label">Optional</span>
             <span class="file-name">No file selected</span>
             <span class="file-list"></span>
@@ -133,19 +142,66 @@
           <label class="drop-zone level-only" data-key="image" data-levels="1,2,3">
             <input type="file" accept="image/*" multiple>
             <span class="file-icon" aria-hidden="true">IMG</span>
-            <span class="drop-title">Images</span>
+            <span class="drop-title">Reference images</span>
             <span class="optional-label">Optional</span>
             <span class="file-name">No file selected</span>
             <span class="file-list"></span>
           </label>
         </section>
 
+        <section id="literature-actions" class="literature-actions level-only" data-levels="1">
+          <div>
+            <strong>Turn papers into MIMI background</strong>
+            <p id="literature-status" aria-live="polite">
+              Drop PDFs above. A task specification targets the extraction; without one it stays general.
+            </p>
+          </div>
+          <div class="literature-buttons">
+            <label class="literature-limit" for="literature-max-predicates">
+              <span>Maximum per paper</span>
+              <input id="literature-max-predicates" type="number" min="1" max="250" step="1" value="10">
+            </label>
+            <button id="abandon-literature" class="danger-button" type="button" hidden>
+              Abandon extraction
+            </button>
+            <button id="extract-literature" class="secondary-button" type="button" disabled>
+              Extract into Background
+            </button>
+          </div>
+        </section>
+
         <section class="resume-panel level-only" data-levels="3" aria-label="Resume controls">
           <label class="number-control">
-            Start at task
-            <input id="start-subtask" type="number" min="1" step="1" value="1">
+            Start at task (owned workspace reconstruction)
+            <input id="start-subtask" type="number" min="1" max="1" step="1" value="1" disabled>
           </label>
         </section>
+
+        <details class="settings-panel review-settings-panel" open>
+          <summary>
+            <span>
+              <strong>Review &amp; recovery limits</strong>
+              <small>Control repair reviews and plan recovery</small>
+            </span>
+          </summary>
+          <p class="review-help">
+            Every attempt runs Coder, executes the result, and then runs Verifier. A failed attempt
+            also receives a read-only root-cause review before the next repair. After all attempts
+            fail, MIMI may revise the plan and create replacement tasks.
+          </p>
+          <div class="review-settings-grid">
+            <label class="number-control" for="max-subtask-attempts">
+              <span>Review attempts per task</span>
+              <input id="max-subtask-attempts" type="number" min="1" max="20" step="1" value="3">
+              <small>Maximum Coder → execution → Verifier cycles for each coding task.</small>
+            </label>
+            <label class="number-control" for="max-plan-revisions">
+              <span>Plan recovery revisions</span>
+              <input id="max-plan-revisions" type="number" min="0" max="20" step="1" value="3">
+              <small>Maximum Planner/Task Breaker recoveries after a task uses all attempts; 0 disables recovery.</small>
+            </label>
+          </div>
+        </details>
 
         <details class="model-panel settings-panel">
           <summary>
@@ -153,42 +209,42 @@
               <strong>Models</strong>
             </span>
           </summary>
+          <p class="model-help">
+            Planner, Task Breaker, Verifier, and Documentation can use compatible Responses API
+            models. Coder and the read-only failure reviewer use Codex-compatible models. At Level
+            3, Planner and Task Breaker are skipped initially but can run if a failed task requires
+            plan recovery.
+          </p>
           <div class="model-grid">
             <fieldset class="agent-settings" data-agent="planner">
-              <legend>Planner</legend>
+              <legend>Planner (API agent)</legend>
               <label>Model <select data-model-agent="planner"></select></label>
               <label>Reasoning <select data-setting-agent="planner" data-setting-name="reasoning_effort"></select></label>
               <label>Verbosity <select data-setting-agent="planner" data-setting-name="verbosity"></select></label>
             </fieldset>
-            <fieldset class="agent-settings" data-agent="supervisor">
-              <legend>Supervisor</legend>
-              <label>Model <select data-model-agent="supervisor"></select></label>
-              <label>Reasoning <select data-setting-agent="supervisor" data-setting-name="reasoning_effort"></select></label>
-              <label>Verbosity <select data-setting-agent="supervisor" data-setting-name="verbosity"></select></label>
-            </fieldset>
             <fieldset class="agent-settings" data-agent="task_breaker">
-              <legend>Task Breaker</legend>
+              <legend>Task Breaker (API agent)</legend>
               <label>Model <select data-model-agent="task_breaker"></select></label>
               <label>Reasoning <select data-setting-agent="task_breaker" data-setting-name="reasoning_effort"></select></label>
               <label>Verbosity <select data-setting-agent="task_breaker" data-setting-name="verbosity"></select></label>
             </fieldset>
             <fieldset class="agent-settings" data-agent="coder">
-              <legend>Coder</legend>
+              <legend>Coder (Codex)</legend>
               <label>Model <select data-model-agent="coder"></select></label>
               <label>Reasoning <select data-setting-agent="coder" data-setting-name="reasoning_effort"></select></label>
               <label>Verbosity <select data-setting-agent="coder" data-setting-name="verbosity"></select></label>
             </fieldset>
             <fieldset class="agent-settings" data-agent="verifier">
-              <legend>Verifier</legend>
+              <legend>Verifier (API agent)</legend>
               <label>Model <select data-model-agent="verifier"></select></label>
               <label>Reasoning <select data-setting-agent="verifier" data-setting-name="reasoning_effort"></select></label>
               <label>Verbosity <select data-setting-agent="verifier" data-setting-name="verbosity"></select></label>
             </fieldset>
-            <fieldset class="agent-settings" data-agent="coder_secretary">
-              <legend>Coder Secretary</legend>
-              <label>Model <select data-model-agent="coder_secretary"></select></label>
-              <label>Reasoning <select data-setting-agent="coder_secretary" data-setting-name="reasoning_effort"></select></label>
-              <label>Verbosity <select data-setting-agent="coder_secretary" data-setting-name="verbosity"></select></label>
+            <fieldset class="agent-settings" data-agent="documentation">
+              <legend>Documentation (API agent)</legend>
+              <label>Model <select data-model-agent="documentation"></select></label>
+              <label>Reasoning <select data-setting-agent="documentation" data-setting-name="reasoning_effort"></select></label>
+              <label>Verbosity <select data-setting-agent="documentation" data-setting-name="verbosity"></select></label>
             </fieldset>
           </div>
         </details>
@@ -215,6 +271,11 @@
         </section>
 
         <section class="output-grid" aria-label="Results">
+          <details class="output-panel wide" open>
+            <summary>Live activity (also printed in PowerShell)</summary>
+            <pre id="activity-output" class="activity-terminal" role="log" aria-live="polite">No activity yet.</pre>
+          </details>
+
           <details class="output-panel result-only" data-levels="1,2" open>
             <summary>Plan</summary>
             <pre id="planner-output" class="output-text">No plan yet.</pre>

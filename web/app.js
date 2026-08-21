@@ -1,6 +1,7 @@
 const selectedFiles = {
   spec: [],
   background: [],
+  literaturePdfs: [],
   image: [],
   plannerOutput: [],
   taskBreaker: [],
@@ -10,13 +11,16 @@ let modelCatalog = null;
 let selectedLevel = null;
 let currentRunActive = false;
 let hasRunStarted = false;
+let literatureExtracting = false;
+let literatureAbandoning = false;
+let literatureJobId = null;
+let literatureRequestStarted = false;
 const defaultModels = {
-  planner: "gpt-5.1",
-  task_breaker: "gpt-5-nano",
-  coder: "gpt-5-nano",
-  verifier: "gpt-5-nano",
-  supervisor: "gpt-5-nano",
-  coder_secretary: "gpt-5-nano",
+  planner: "gpt-5.6-sol",
+  task_breaker: "gpt-5.6-terra",
+  coder: "gpt-5.6-sol",
+  verifier: "gpt-5.6-sol",
+  documentation: "gpt-5.6-luna",
 };
 const defaultAgentSettings = {
   planner: {
@@ -56,12 +60,15 @@ const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run-button");
 const runState = document.getElementById("run-state");
 const startSubtaskInput = document.getElementById("start-subtask");
+const maxSubtaskAttemptsInput = document.getElementById("max-subtask-attempts");
+const maxPlanRevisionsInput = document.getElementById("max-plan-revisions");
 const progressLabel = document.getElementById("progress-label");
 const progressCount = document.getElementById("progress-count");
 const progressFill = document.getElementById("progress-fill");
 const plannerOutput = document.getElementById("planner-output");
 const taskBreakerOutput = document.getElementById("task-breaker-output");
 const coderOutput = document.getElementById("coder-output");
+const activityOutput = document.getElementById("activity-output");
 const voiceIntake = document.getElementById("voice-intake");
 const voiceStatus = document.getElementById("voice-status");
 const voiceDevice = document.getElementById("voice-device");
@@ -74,6 +81,10 @@ const voiceResult = document.getElementById("voice-result");
 const voiceResultPath = document.getElementById("voice-result-path");
 const voiceResultPreview = document.getElementById("voice-result-preview");
 const voiceRecordAgainButton = document.getElementById("voice-record-again");
+const extractLiteratureButton = document.getElementById("extract-literature");
+const abandonLiteratureButton = document.getElementById("abandon-literature");
+const literatureStatus = document.getElementById("literature-status");
+const literatureMaxPredicatesInput = document.getElementById("literature-max-predicates");
 const popPhoneLaunch = new URLSearchParams(window.location.search).get("source") === "pop-phone";
 const maxVoiceSeconds = 300;
 let voiceStream = null;
@@ -92,6 +103,11 @@ function setStatus(message, state = "idle") {
   runState.textContent = state === "running" ? "Running" : state === "error" ? "Error" : "Idle";
   runState.dataset.state = state;
   runState.hidden = state === "idle";
+}
+
+function setLiteratureStatus(message, state = "idle") {
+  literatureStatus.textContent = message;
+  literatureStatus.dataset.state = state;
 }
 
 function setVoiceStatus(message, state = "idle") {
@@ -344,6 +360,7 @@ async function createVoiceSpecification(wavBlob) {
     const specDropZone = document.querySelector('.drop-zone[data-key="spec"]');
     selectedFiles.spec = [specFile];
     renderFileList("spec", specDropZone);
+    setLiteratureStatus(literatureReadyMessage());
     voiceResultPath.textContent = `Saved to ${result.path} using ${result.model}.`;
     voiceResultPreview.textContent = result.text;
     voiceIntake.hidden = true;
@@ -430,7 +447,7 @@ function conciseStatus(state) {
     collecting: "Collecting outputs",
     verifier: "Checking results",
     documentation: "Updating documentation",
-    recovery_analysis: "Diagnosing root cause",
+    root_cause: "Diagnosing root cause",
     planner_revision: "Revising plan",
     task_breaker_revision: "Updating subtasks",
     integration: "Integrating accepted modules",
@@ -456,8 +473,19 @@ function updateReadyState({ updateStatus = true } = {}) {
   runControls.hidden = !hasRequiredFile && !currentRunActive && !hasRunStarted;
   abortButton.hidden = !currentRunActive;
   runButton.hidden = currentRunActive;
-  runButton.disabled = currentRunActive || !hasRequiredFile;
-  changeLevelButton.disabled = currentRunActive;
+  runButton.disabled = currentRunActive || literatureExtracting || !hasRequiredFile;
+  changeLevelButton.disabled = currentRunActive || literatureExtracting;
+  abandonLiteratureButton.hidden = !literatureExtracting;
+  abandonLiteratureButton.disabled = literatureAbandoning;
+  extractLiteratureButton.disabled = (
+    currentRunActive
+    || literatureExtracting
+    || selectedLevel !== 1
+    || selectedFiles.literaturePdfs.length === 0
+  );
+  literatureMaxPredicatesInput.disabled = currentRunActive || literatureExtracting;
+  maxSubtaskAttemptsInput.disabled = currentRunActive || literatureExtracting;
+  maxPlanRevisionsInput.disabled = currentRunActive || literatureExtracting;
 
   if (!currentRunActive && updateStatus) {
     setStatus("Ready", "idle");
@@ -481,11 +509,14 @@ function clearSelectedFiles() {
     dropZone.querySelector("input").value = "";
     renderFileList(key, dropZone);
   }
+  setLiteratureStatus(
+    "Drop PDFs above. A task specification targets the extraction; without one it stays general.",
+  );
   startSubtaskInput.value = "1";
 }
 
 function selectLevel(level, { preserveFiles = false } = {}) {
-  if (!levelConfig[level] || currentRunActive) {
+  if (!levelConfig[level] || currentRunActive || literatureExtracting) {
     return;
   }
   if (!preserveFiles) {
@@ -511,7 +542,7 @@ function selectLevel(level, { preserveFiles = false } = {}) {
 }
 
 function returnToLevelSelector() {
-  if (currentRunActive) {
+  if (currentRunActive || literatureExtracting) {
     return;
   }
   clearSelectedFiles();
@@ -524,11 +555,101 @@ function returnToLevelSelector() {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+function validateLiteratureFiles(files) {
+  if (files.length > 20) {
+    throw new Error("Select at most 20 literature PDFs at a time.");
+  }
+  let totalBytes = 0;
+  for (const file of files) {
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      throw new Error(`${file.name} is not a PDF.`);
+    }
+    if (file.size <= 0) {
+      throw new Error(`${file.name} is empty.`);
+    }
+    if (file.size >= 50 * 1024 * 1024) {
+      throw new Error(`${file.name} must be under 50 MB.`);
+    }
+    totalBytes += file.size;
+  }
+  if (totalBytes > 100 * 1024 * 1024) {
+    throw new Error("Literature PDFs must total no more than 100 MB.");
+  }
+}
+
+function literatureReadyMessage() {
+  if (!selectedFiles.literaturePdfs.length) {
+    return "Drop PDFs above. A task specification targets the extraction; without one it stays general.";
+  }
+  if (selectedFiles.spec.length) {
+    const imageCount = selectedFiles.image.length;
+    const imageContext = imageCount
+      ? ` and ${imageCount} reference image${imageCount === 1 ? "" : "s"}`
+      : "";
+    return `Ready for task-specific extraction using ${selectedFiles.spec[0].name}${imageContext}.`;
+  }
+  return selectedFiles.image.length
+    ? "Ready for general extraction. Reference images require a task specification and will not be sent."
+    : "Ready for general extraction. Add a task specification to target the results.";
+}
+
+function validateLiteratureReferenceImages(files) {
+  if (files.length > 5) {
+    throw new Error("Use at most 5 reference images per extraction.");
+  }
+  const allowedExtensions = new Set([".jpeg", ".jpg", ".png", ".webp"]);
+  let totalBytes = 0;
+  for (const file of files) {
+    const dot = file.name.lastIndexOf(".");
+    const extension = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
+    if (!allowedExtensions.has(extension)) {
+      throw new Error(`${file.name} must be a PNG, JPEG, or WEBP image.`);
+    }
+    if (file.size <= 0) {
+      throw new Error(`${file.name} is empty.`);
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      throw new Error(`${file.name} must be no larger than 20 MB.`);
+    }
+    totalBytes += file.size;
+  }
+  if (totalBytes > 40 * 1024 * 1024) {
+    throw new Error("Reference images must total no more than 40 MB.");
+  }
+}
+
+function selectedLiteraturePredicateLimit() {
+  const rawValue = literatureMaxPredicatesInput.value.trim();
+  if (!/^\d+$/.test(rawValue)) {
+    throw new Error("Maximum predicates per paper must be a whole number.");
+  }
+  const value = Number.parseInt(rawValue, 10);
+  if (value < 1 || value > 250) {
+    throw new Error("Maximum predicates per paper must be between 1 and 250.");
+  }
+  return value;
+}
+
 function setSelectedFiles(key, files, dropZone) {
   const allowMultiple = dropZone.querySelector("input").multiple;
   const incomingFiles = Array.from(files || []);
+  if (key === "literaturePdfs") {
+    try {
+      validateLiteratureFiles(incomingFiles);
+    } catch (error) {
+      selectedFiles[key] = [];
+      dropZone.querySelector("input").value = "";
+      renderFileList(key, dropZone);
+      setLiteratureStatus(error.message, "error");
+      updateReadyState({ updateStatus: false });
+      return;
+    }
+  }
   selectedFiles[key] = allowMultiple ? incomingFiles : incomingFiles.slice(0, 1);
   renderFileList(key, dropZone);
+  if ((key === "literaturePdfs" || key === "spec" || key === "image") && !literatureExtracting) {
+    setLiteratureStatus(literatureReadyMessage());
+  }
   updateReadyState();
 }
 
@@ -536,6 +657,9 @@ function removeSelectedFile(key, index, dropZone) {
   selectedFiles[key].splice(index, 1);
   dropZone.querySelector("input").value = "";
   renderFileList(key, dropZone);
+  if ((key === "literaturePdfs" || key === "spec" || key === "image") && !literatureExtracting) {
+    setLiteratureStatus(literatureReadyMessage());
+  }
   updateReadyState();
 }
 
@@ -596,6 +720,156 @@ function readDataUrl(file) {
   });
 }
 
+async function extractLiteraturePdfs() {
+  const files = [...selectedFiles.literaturePdfs];
+  const taskSpecFile = selectedFiles.spec[0] || null;
+  const referenceImageFiles = taskSpecFile ? [...selectedFiles.image] : [];
+  if (!files.length || literatureExtracting || currentRunActive) {
+    return;
+  }
+  let maxPredicatesPerPaper;
+  try {
+    validateLiteratureReferenceImages(referenceImageFiles);
+    maxPredicatesPerPaper = selectedLiteraturePredicateLimit();
+  } catch (error) {
+    setLiteratureStatus(error.message, "error");
+    return;
+  }
+
+  literatureExtracting = true;
+  literatureAbandoning = false;
+  literatureRequestStarted = false;
+  literatureJobId = (
+    globalThis.crypto?.randomUUID?.()
+    || `literature-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+  extractLiteratureButton.textContent = "Extracting...";
+  setLiteratureStatus(
+    taskSpecFile
+      ? `Extracting up to ${maxPredicatesPerPaper} candidates per paper for ${taskSpecFile.name}, then ranking all papers together${referenceImageFiles.length ? ` using ${referenceImageFiles.length} reference image${referenceImageFiles.length === 1 ? "" : "s"}` : ""}. This may take a few minutes.`
+      : `Running general extraction on ${files.length} PDF${files.length === 1 ? "" : "s"}, up to ${maxPredicatesPerPaper} per paper. This may take a few minutes.`,
+    "running",
+  );
+  updateReadyState({ updateStatus: false });
+
+  try {
+    const pdfs = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      dataUrl: await readDataUrl(file),
+    })));
+    const taskSpec = taskSpecFile
+      ? { name: taskSpecFile.name, text: await taskSpecFile.text() }
+      : null;
+    const referenceImages = await Promise.all(referenceImageFiles.map(async (file) => ({
+      name: file.name,
+      dataUrl: await readDataUrl(file),
+    })));
+    if (literatureAbandoning) {
+      throw new DOMException("Literature extraction abandoned.", "AbortError");
+    }
+
+    literatureRequestStarted = true;
+    const response = await fetch("/literature-predicates", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-MIMI-Literature-Job": literatureJobId,
+      },
+      body: JSON.stringify({
+        pdfs,
+        taskSpec,
+        referenceImages,
+        maxPredicatesPerPaper,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      const error = new Error(result.message || "Could not extract the literature PDFs.");
+      error.abandoned = Boolean(result.abandoned);
+      throw error;
+    }
+    if (literatureAbandoning) {
+      throw new DOMException("Literature extraction abandoned.", "AbortError");
+    }
+
+    const backgroundFile = new File(
+      [result.text],
+      result.name || "literature_predicates.json",
+      { type: "application/json" },
+    );
+    selectedFiles.background = [backgroundFile];
+    const backgroundDropZone = document.querySelector('.drop-zone[data-key="background"]');
+    backgroundDropZone.querySelector("input").value = "";
+    renderFileList("background", backgroundDropZone);
+    setLiteratureStatus(
+      result.selectionMode === "task_specific"
+        ? `Task-specific background ready: ${result.predicateCount} predicates globally ranked from most to least useful across ${result.pdfCount} PDF${result.pdfCount === 1 ? "" : "s"}, with a maximum of ${result.maxPredicatesPerPaper} per paper${result.referenceImageCount ? ` and ${result.referenceImageCount} reference image${result.referenceImageCount === 1 ? "" : "s"}` : ""}.`
+        : `General background ready: ${result.predicateCount} predicates from ${result.pdfCount} PDF${result.pdfCount === 1 ? "" : "s"}, with a maximum of ${result.maxPredicatesPerPaper} per paper.`,
+      "success",
+    );
+  } catch (error) {
+    if (literatureAbandoning || error.name === "AbortError" || error.abandoned) {
+      setLiteratureStatus("Extraction abandoned. No background was added.", "error");
+    } else {
+      setLiteratureStatus(`Extraction failed: ${error.message}`, "error");
+    }
+  } finally {
+    literatureExtracting = false;
+    literatureAbandoning = false;
+    literatureRequestStarted = false;
+    literatureJobId = null;
+    extractLiteratureButton.textContent = "Extract into Background";
+    updateReadyState({ updateStatus: false });
+  }
+}
+
+async function abandonLiteratureExtraction() {
+  if (!literatureExtracting || literatureAbandoning) {
+    return;
+  }
+
+  literatureAbandoning = true;
+  setLiteratureStatus(
+    literatureRequestStarted
+      ? "Abandon requested. Waiting for the current PDF request to finish and clean up."
+      : "Abandoning before the PDFs are sent.",
+    "running",
+  );
+  updateReadyState({ updateStatus: false });
+
+  if (!literatureRequestStarted) {
+    return;
+  }
+
+  try {
+    let response = null;
+    let result = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      response = await fetch("/literature-predicates/abandon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ jobId: literatureJobId }),
+      });
+      result = await response.json();
+      if (response.ok || response.status !== 409 || !literatureExtracting) {
+        break;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+    if (!response?.ok && literatureExtracting) {
+      throw new Error(result?.message || "Could not abandon the extraction.");
+    }
+  } catch (error) {
+    if (!literatureExtracting) {
+      return;
+    }
+    literatureAbandoning = false;
+    setLiteratureStatus(`Could not abandon extraction: ${error.message}`, "error");
+    updateReadyState({ updateStatus: false });
+  }
+}
+
 async function buildPayload() {
   if (!selectedLevel) {
     throw new Error("Choose a MIMI starting level first.");
@@ -640,6 +914,12 @@ async function buildPayload() {
     startSubtask: selectedLevel === 3
       ? (Number.parseInt(startSubtaskInput.value, 10) || 1)
       : 1,
+    maxSubtaskAttempts: Number.isInteger(Number.parseInt(maxSubtaskAttemptsInput.value, 10))
+      ? Number.parseInt(maxSubtaskAttemptsInput.value, 10)
+      : 3,
+    maxPlanRevisions: Number.isInteger(Number.parseInt(maxPlanRevisionsInput.value, 10))
+      ? Number.parseInt(maxPlanRevisionsInput.value, 10)
+      : 3,
     models: selectedModels(),
     settings: selectedSettings(),
   };
@@ -732,6 +1012,7 @@ async function pollStatus() {
       || Boolean(state.planner_output)
       || Boolean(state.task_breaker?.subtasks?.length)
       || Boolean(state.coder_runs?.length)
+      || Boolean(state.activity?.length)
     );
     if (hasRuntimeState && selectedLevel) {
       hasRunStarted = true;
@@ -771,9 +1052,47 @@ function escapeHtml(value) {
 
 function renderRunState(state) {
   renderProgress(state.progress || {});
+  renderActivity(state);
   renderPlanner(state.planner_output || "");
   renderTaskBreaker(state.task_breaker || {});
   renderCoderRuns(state.coder_runs || []);
+}
+
+function renderActivity(state) {
+  const entries = state.activity || [];
+  const latestTimestamp = entries.length
+    ? entries[entries.length - 1].timestamp
+    : state.started_at;
+  const lastActivityAge = formatActivityAge(latestTimestamp);
+  const headline = state.running
+    ? `[LIVE${lastActivityAge ? ` - last activity ${lastActivityAge} ago` : ""}] ${state.message || "MIMI is running."}`
+    : `[${String(state.phase || "idle").toUpperCase()}] ${state.message || "MIMI is idle."}`;
+  const lines = entries.map((entry) => {
+    const time = String(entry.timestamp || "").split("T").pop().slice(0, 8) || "--:--:--";
+    const task = entry.task_id ? ` [${entry.task_id}]` : "";
+    const attempt = entry.attempt ? ` attempt ${entry.attempt}` : "";
+    return `[${time}] ${entry.agent || "MIMI"}${task}${attempt}: ${entry.message || ""}`;
+  });
+  activityOutput.textContent = [headline, "", ...lines].join("\n");
+  activityOutput.scrollTop = activityOutput.scrollHeight;
+}
+
+function formatActivityAge(timestamp) {
+  const started = Date.parse(timestamp || "");
+  if (!Number.isFinite(started)) {
+    return "";
+  }
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return `${minutes}m ${seconds}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 function renderProgress(progress) {
@@ -800,7 +1119,7 @@ function renderTaskBreaker(taskBreaker) {
     <article class="subtask-item">
       <div class="subtask-title">
         <span>Task ${escapeHtml(task.number)}${task.task_id ? ` - ${escapeHtml(task.task_id)}` : ""}</span>
-        <span class="badge">${escapeHtml(task.status || (task.requires_coding ? "pending" : "no code"))}${task.attempt_count ? ` - ${escapeHtml(task.attempt_count)}/${escapeHtml(task.max_attempts || 3)} attempts` : ""}</span>
+        <span class="badge" title="${escapeHtml(task.detail || "")}">${escapeHtml(task.status || (task.requires_coding ? "pending" : "no code"))}${task.attempt_count ? ` - ${escapeHtml(task.attempt_count)}/${escapeHtml(task.max_attempts || 3)} attempts` : ""}</span>
       </div>
       <div class="subtask-summary">${escapeHtml(task.summary)}</div>
     </article>
@@ -852,13 +1171,23 @@ function renderCoderAttempt(run) {
       </summary>
       <div class="coder-body">
         <section class="artifact-section">
-          <h3>Code</h3>
+          <h3>Codex change summary</h3>
           <pre class="code-block">${escapeHtml(run.coder_output || "")}</pre>
         </section>
         <section class="artifact-section">
           <h3>Output</h3>
           <pre class="terminal-block">${escapeHtml(formatExecutionOutput(run))}</pre>
         </section>
+        <section class="artifact-section">
+          <h3>Verifier</h3>
+          <pre class="txt-block">${escapeHtml(run.verifier_output || "No verifier output.")}</pre>
+        </section>
+        ${run.root_cause ? `
+          <section class="artifact-section">
+            <h3>Read-only root-cause review</h3>
+            <pre class="txt-block">${escapeHtml(JSON.stringify(run.root_cause, null, 2))}</pre>
+          </section>
+        ` : ""}
         <section class="artifact-section">
           <h3>Plots</h3>
           ${renderPlots(artifacts.images || [])}
@@ -991,6 +1320,8 @@ voiceStartButton.addEventListener("click", startVoiceCapture);
 voiceStopButton.addEventListener("click", () => stopVoiceCapture());
 voiceCancelButton.addEventListener("click", leaveVoiceIntake);
 voiceRecordAgainButton.addEventListener("click", showVoiceIntake);
+extractLiteratureButton.addEventListener("click", extractLiteraturePdfs);
+abandonLiteratureButton.addEventListener("click", abandonLiteratureExtraction);
 
 setupModelSelectors().catch((error) => {
   setStatus(`Could not load model catalog: ${error.message}`, "error");

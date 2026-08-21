@@ -1,0 +1,6 @@
+openai>=2.45,<3
+openai-agents>=0.20,<0.21
+openai-codex>=0.144.4,<0.145
+pydantic>=2.12,<3
+python-dotenv>=1,<2
+pypdf>=5,<7

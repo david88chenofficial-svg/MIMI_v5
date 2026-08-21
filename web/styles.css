@@ -322,6 +322,10 @@ h2 {
   border-top-color: var(--gold);
 }
 
+.drop-zone[data-key="literaturePdfs"]::before {
+  border-top-color: #a5453f;
+}
+
 .drop-zone[data-key="image"]::before {
   border-top-color: var(--blue);
 }
@@ -350,6 +354,11 @@ h2 {
 .drop-zone[data-key="background"].has-file {
   border-color: var(--gold);
   background: var(--gold-soft);
+}
+
+.drop-zone[data-key="literaturePdfs"].has-file {
+  border-color: #a5453f;
+  background: #fff3f1;
 }
 
 .drop-zone[data-key="image"].has-file {
@@ -394,6 +403,12 @@ h2 {
   border-color: rgba(148, 111, 25, 0.3);
   background: #fffaf0;
   color: var(--gold);
+}
+
+.drop-zone[data-key="literaturePdfs"] .file-icon {
+  border-color: rgba(165, 69, 63, 0.3);
+  background: #fff5f3;
+  color: #8d3934;
 }
 
 .drop-zone[data-key="image"] .file-icon {
@@ -498,8 +513,76 @@ h2 {
   color: var(--accent-strong);
 }
 
+.literature-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  border: 1px solid rgba(165, 69, 63, 0.28);
+  border-radius: 8px;
+  background: #fffaf9;
+  box-shadow: 0 10px 26px rgba(31, 47, 65, 0.08);
+  padding: 16px 18px;
+}
+
+.literature-actions strong {
+  color: var(--ink);
+}
+
+.literature-actions p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.literature-actions p[data-state="running"] {
+  color: var(--blue);
+}
+
+.literature-actions p[data-state="success"] {
+  color: var(--accent-strong);
+}
+
+.literature-actions p[data-state="error"] {
+  color: var(--danger);
+}
+
+.literature-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.literature-limit {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.literature-limit input {
+  width: 92px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.literature-limit input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(165, 69, 63, 0.12);
+  outline: none;
+}
+
 .summary-panel,
 .model-panel,
+.review-settings-panel,
 .resume-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -550,6 +633,31 @@ h2 {
 
 .settings-panel .model-grid {
   padding: 18px;
+}
+
+.review-help {
+  margin: 14px 18px 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.review-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  padding: 18px;
+}
+
+.review-settings-grid .number-control {
+  width: auto;
+}
+
+.review-settings-grid small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
 }
 
 .resume-panel {
@@ -796,9 +904,30 @@ button:disabled {
 
 .output-text,
 .subtask-list,
-.coder-output {
+.coder-output,
+.activity-terminal {
   margin: 0;
   padding: 18px;
+}
+
+.activity-terminal {
+  min-height: 180px;
+  max-height: 360px;
+  overflow: auto;
+  border: 0;
+  background: #101820;
+  color: #d8f3e8;
+  white-space: pre-wrap;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.model-help {
+  margin: 14px 18px 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .output-text {
@@ -1020,9 +1149,11 @@ button:disabled {
 
   .upload-grid,
   .level-grid,
+  .literature-actions,
   .model-panel,
   .resume-panel,
   .model-grid,
+  .review-settings-grid,
   .agent-settings,
   .summary-panel,
   .output-grid {
@@ -1067,4 +1198,3 @@ button:disabled {
     width: auto;
   }
 }
-
