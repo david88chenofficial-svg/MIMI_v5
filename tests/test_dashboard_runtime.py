@@ -149,7 +149,7 @@ class BrowserShutdownTests(unittest.TestCase):
         project_root = Path(MIMI_dashboard.__file__).resolve().parent
         script = (
             "import threading, time; "
-            "from lauch_MIMI import exit_without_lingering_workers; "
+            "from launch_MIMI import exit_without_lingering_workers; "
             "threading.Thread(target=time.sleep, args=(30,), daemon=False).start(); "
             "exit_without_lingering_workers(0)"
         )

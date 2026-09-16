@@ -103,7 +103,7 @@ Planner -> Task Breaker -> one whole-plan Codex build
 Start the normal file workflow:
 
 ```powershell
-python .\lauch_MIMI.py
+python .\launch_MIMI.py
 ```
 
 MIMI opens with a Level 1, Level 2, or Level 3 choice. Only the file drop targets
@@ -143,7 +143,7 @@ discarded.
 Start directly in Native Union POP Phone voice-intake mode:
 
 ```powershell
-python .\lauch_MIMI.py --pop-phone
+python .\launch_MIMI.py --pop-phone
 ```
 
 Voice intake records from the POP Phone microphone, creates a clarified Markdown

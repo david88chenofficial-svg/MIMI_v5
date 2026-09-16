@@ -9,5 +9,5 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" "lauch_MIMI.py" %*
+".venv\Scripts\python.exe" "launch_MIMI.py" %*
 if errorlevel 1 pause

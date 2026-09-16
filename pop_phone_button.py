@@ -29,7 +29,7 @@ from MIMI_control import get_server_status, stop_server
 
 
 ROOT = Path(__file__).resolve().parent
-MIMI_LAUNCHER = ROOT / "lauch_MIMI.py"
+MIMI_LAUNCHER = ROOT / "launch_MIMI.py"
 POP_PHONE_ID = "VID_2D1D&PID_000F"
 BUTTON_DOWN_REPORT = b"\x00\x04\x00"
 BUTTON_UP_REPORT = b"\x00\x00\x00"
@@ -542,7 +542,7 @@ def focus_mimi_window(title_fragment: str = "MIMI Inputs") -> bool:
 
 
 def open_mimi_url(port: int, *, voice_mode: bool = True) -> None:
-    from lauch_MIMI import open_in_chrome
+    from launch_MIMI import open_in_chrome
 
     launch_id = uuid.uuid4().hex
     source_query = "&source=pop-phone" if voice_mode else ""
@@ -1014,4 +1014,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -75,10 +75,10 @@ def main() -> int:
     if sys.platform == "win32":
         print("Then double-click login_Codex.bat once, followed by run_MIMI.bat.")
         print("You can also start MIMI directly with:")
-        print(r"  .\.venv\Scripts\python.exe .\lauch_MIMI.py")
+        print(r"  .\.venv\Scripts\python.exe .\launch_MIMI.py")
     else:
         print("Then run:")
-        print("  ./.venv/bin/python ./lauch_MIMI.py")
+        print("  ./.venv/bin/python ./launch_MIMI.py")
     return 0
 
 
