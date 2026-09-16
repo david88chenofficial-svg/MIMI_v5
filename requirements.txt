@@ -1,6 +1,15 @@
+# OpenAI Python SDK (Responses API, file uploads, and voice generation)
 openai>=2.45,<3
+
+# OpenAI Agents SDK; this package provides the `agents` Python module
 openai-agents>=0.20,<0.21
+
+# Python SDK and bundled CLI runtime used by MIMI's Codex coding agent
 openai-codex>=0.144.4,<0.145
+
+# Structured agent outputs and local environment-file loading
 pydantic>=2.12,<3
 python-dotenv>=1,<2
+
+# Local PDF support
 pypdf>=5,<7

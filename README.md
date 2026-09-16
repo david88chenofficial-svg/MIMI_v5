@@ -4,17 +4,49 @@ MIMI turns a scientific specification into a verified codebase. The harness owns
 the filesystem and run state; language-model agents do not choose or search for
 physical paths.
 
-## Install
+## Quick start on Windows
 
 Python 3.10 or newer is required.
+
+1. Clone or download this repository.
+2. Double-click `setup_MIMI.bat`. It creates an isolated `.venv` environment,
+   installs every required package, and checks the installation.
+3. Open the newly created `API_key.env` file and add your key:
+
+   ```text
+   OPENAI_API_KEY=your-key-here
+   ```
+
+   Create a key on the [OpenAI API key page](https://platform.openai.com/api-keys).
+   `API_key.env` is git-ignored and must never be committed or shared.
+4. Double-click `login_Codex.bat` once. It keeps an existing Codex login or opens
+   the ChatGPT sign-in page when authentication is needed.
+5. Double-click `run_MIMI.bat` whenever you want to start MIMI.
+
+Sign into Codex with a ChatGPT account that has access to Codex. API usage by the
+other agents is billed to the API key in `API_key.env`; a ChatGPT subscription
+and API billing are separate.
+
+## Command-line installation
+
+The setup helper works on Windows, macOS, and Linux:
+
+```powershell
+python .\setup_MIMI.py
+```
+
+It installs the dependencies from `requirements.txt`, including the official
+OpenAI Python SDK (`openai`), OpenAI Agents SDK (`openai-agents`), and Codex Python
+SDK (`openai-codex`). To install them manually instead, create and activate a
+virtual environment and run:
 
 ```powershell
 python -m pip install -r .\requirements.txt
 ```
 
-Set `OPENAI_API_KEY` in the environment or place it in the local, git-ignored
-`API_key.env` file. The Codex SDK is used for product-code edits, while the OpenAI
-Agents SDK is used for planning, task shaping, documentation, and verification.
+You can also set `OPENAI_API_KEY` in the environment instead of using the local
+file. The Codex SDK is used for product-code edits, while the OpenAI Agents SDK is
+used for planning, task shaping, documentation, and verification.
 
 ## Agent ownership model
 
