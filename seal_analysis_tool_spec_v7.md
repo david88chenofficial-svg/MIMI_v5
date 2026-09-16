@@ -24,42 +24,32 @@ Develop a reduced-order solver for an axisymmetric labyrinth seal with a fixed r
 
 This is a suitable MVP because it captures leakage, pressure distribution and floating-stator force balance without requiring full CFD.
 
-## Required Inputs
+## Required User Inputs
 
 ### Boundary conditions
-- overall inlet stagnation pressure
-- overall outlet static pressure
+- overall inlet stagnation pressure (Defalut: 2 bar)
+- overall outlet static pressure (Defalut: 1 bar)
 
 ### Fluid properties
-- working fluid
-- inlet temperature
-- specific heat ratio, `gamma`
-- gas constant, `R`
-
-### Main geometry
-- inner radius or rotor diameter
-- outer radius
-- floating stator inlet diameter
-- floating stator outlet diameter
-- floating stator radial clearance
-- floating-stator mass
+- working fluid (Defalut: air)
+- inlet temperature (Defalut: 300 K)
+- specific heat ratio, `gamma` (Defalut: 1.4)
+- gas constant, `R` (Defalut: 287.05)
 
 ### Seal-gap geometry
-- nominal stator-rotor gap
-- tooth-tip clearance, `c`
+- Dis-engaged tooth-tip clearance (Defalut: 1.5e-3 m)
+- Engaged tooth-tip clearance, `c` (Defalut: 2e-4 m)
 
 ### Tooth geometry
-- tooth tip thickness
-- tooth depth
-- tooth pitch
-- tooth disengagement gap
+- tooth tip thickness (Defalut: 0.001 m)
+- distance between neighboring teeth (fixed for all teeth) (Defalut: 0.003 m)
 
 ### Tooth layout
-- radius of the first inlet-side tooth
-- number of inlet-side teeth
-- radius of the first outlet-side tooth
-- number of outlet-side teeth
-- axial spacing between teeth
+- diameter of the first inlet-side tooth (Defalut: 0.12 m)
+- number of inlet-side teeth (Defalut: 8)
+- diameter of the final outlet-side tooth (Defalut: 0.0925 m)
+- number of outlet-side teeth (Defalut: 4)
+- diameter of rotor tip (Default: 0.165 m)
 
 ### Axial placement
 The solver must know the axial positions of the inlet tooth set, central rotor section, outlet tooth set, and cavity boundaries. In the first version, these can be generated automatically from tooth counts and geometric inputs.
@@ -68,13 +58,12 @@ The solver must know the axial positions of the inlet tooth set, central rotor s
 - discharge coefficient for a tooth, `Cd`
 - carryover factor, `k`
 - choked-flow check on/off
-- constant or correlation-based `Cd`
 - constant or correlation-based carryover
-- number of surface points for `p(s)`
-- axial support stiffness or effective restoring stiffness for floating-stator natural-frequency prediction
 - range of allowable inlet-side and outlet-side tooth numbers for force-balance search
 
 ## Outputs
+
+The final python file should allow user to run it easily
 
 ### Primary outputs
 - mass flow rate, `m_dot`
@@ -84,6 +73,7 @@ The solver must know the axial positions of the inlet tooth set, central rotor s
 - balancing force required, `Fbalance`
 - inlet/outlet tooth arrangement that gives `Fbalance = 0` or the minimum practical `|Fbalance|`
 - natural frequency of the floating stator for the given mass and stiffness model
+- pressure distribution plot with clear axes (save pyplot as png)
 
 ### Secondary outputs
 - cavity pressures

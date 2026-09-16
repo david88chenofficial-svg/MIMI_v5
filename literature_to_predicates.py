@@ -30,7 +30,7 @@ from MIMI_credentials import configure_openai_api_key
 
 
 SCHEMA_VERSION = "mimi.predicates.quantitative.v2"
-DEFAULT_MODEL = os.environ.get("MIMI_PREDICATE_MODEL", "gpt-5.6-luna")
+DEFAULT_MODEL = os.environ.get("MIMI_PREDICATE_MODEL", "gpt-5-mini")
 DEFAULT_FOCUS = (
     "mechanical seal design and analysis, including tribology, lubrication, leakage, "
     "materials, geometry, thermal behaviour, deformation, reliability, and operating limits"

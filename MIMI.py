@@ -21,7 +21,7 @@ from agents import Runner
 from openai_codex import AsyncCodex, CodexConfig
 
 from MIMI_agents import Documentation_agent, Planner_agent, VerificationResult, Verifier_agent
-from MIMI_codex import CodexTaskSession, review_root_cause
+from MIMI_codex import CodexPlanChange, CodexPlanSession, CodexTaskResult
 from MIMI_credentials import configure_openai_api_key
 from MIMI_dashboard import (
     add_activity,
@@ -203,13 +203,25 @@ def _synthetic_failure(message: str, relevant_files: list[str] | None = None) ->
     )
 
 
-def _verification_prompt(task: str, artifacts) -> list[dict[str, Any]]:
+def _verification_prompt(
+    task: str,
+    artifacts,
+    accepted_context: str = "",
+) -> list[dict[str, Any]]:
+    upstream = (
+        "\n\nHASH-VALID DOCUMENTATION FROM ACCEPTED UPSTREAM STAGES:\n" + accepted_context
+        if accepted_context
+        else ""
+    )
     content: list[dict[str, Any]] = [
         {
             "type": "input_text",
             "text": (
                 "Verify these artifacts against the task contract. The harness already checked "
-                "that the manifest and paths are valid.\n\nTASK CONTRACT:\n" + task
+                "that the manifest and paths are valid. Treat upstream documentation as context, "
+                "not as a substitute for evidence from this stage.\n\nTASK CONTRACT:\n"
+                + task
+                + upstream
             ),
         }
     ]
@@ -410,6 +422,219 @@ async def main(bundle: MIMIInputBundle | None = None):
         restore_agent_models(original_models)
 
 
+def _coding_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [task for task in tasks if task.get("is_Coding_Team_required") is True]
+
+
+def _task_record(manifest: dict[str, Any], task_id: str) -> dict[str, Any]:
+    for record in manifest["tasks"]:
+        if str(record.get("task_id")) == str(task_id):
+            return record
+    raise KeyError(f"Run manifest has no task record for {task_id}.")
+
+
+def _safe_task_files(paths: RunPaths, result: CodexTaskResult) -> list[str]:
+    """Keep only workspace files that actually exist after a Codex build."""
+
+    index = build_code_index(paths.workspace)
+    available = {str(item.get("path")) for item in index.get("files", [])}
+    candidates = [str(path).replace("\\", "/") for path in result.files]
+    candidates.append(str(result.entrypoint).replace("\\", "/"))
+    return sorted({path for path in candidates if path in available})
+
+
+def _accepted_context(paths: RunPaths) -> str:
+    """Return compact, hash-valid documentation for an in-place Codex repair."""
+
+    return render_code_index(_refresh_deterministic_index(paths), max_chars=40_000)
+
+
+def _run_task_stage(
+    paths: RunPaths,
+    task: dict[str, Any],
+    result: CodexTaskResult,
+    *,
+    attempt_number: int,
+) -> dict[str, Any]:
+    """Execute one task's validation entrypoint and collect deterministic evidence."""
+
+    task_id = str(task["task_id"])
+    attempt_dir = paths.attempt_dir(task_id, attempt_number)
+    update_subtask_status(
+        task_id,
+        "executing",
+        attempt_count=attempt_number,
+        detail="Running this stage's validation entrypoint and collecting artifacts.",
+    )
+    add_activity(
+        "Execution",
+        f"Running {result.entrypoint} and collecting intermediate outputs.",
+        status="running",
+        task_id=task_id,
+        attempt=attempt_number,
+    )
+
+    execution = None
+    artifacts = None
+    deterministic_failure = ""
+    try:
+        entrypoint = resolve_entrypoint(paths.workspace, result.entrypoint, result.files)
+        execution = run_workspace_entrypoint(paths.workspace, entrypoint, attempt_dir)
+        if execution.returncode != 0:
+            deterministic_failure = (
+                f"Entrypoint {execution.entrypoint} exited with code {execution.returncode}. "
+                f"stderr:\n{execution.stderr[-8000:]}"
+            )
+        else:
+            artifacts = collect_artifacts(attempt_dir)
+    except (OSError, ValueError, json.JSONDecodeError, WorkspaceContractError) as exc:
+        deterministic_failure = f"{type(exc).__name__}: {exc}"
+
+    add_activity(
+        "Execution",
+        (
+            f"failed: {deterministic_failure.splitlines()[0]}"
+            if deterministic_failure
+            else f"finished with return code {execution.returncode}"
+        ),
+        status="failed" if deterministic_failure else "complete",
+        task_id=task_id,
+        attempt=attempt_number,
+    )
+    return {
+        "result": result,
+        "execution": execution,
+        "artifacts": artifacts,
+        "deterministic_failure": deterministic_failure,
+    }
+
+
+async def _verify_task_stage(
+    task: dict[str, Any],
+    runtime: dict[str, Any],
+    *,
+    attempt_number: int,
+    accepted_context: str,
+) -> tuple[VerificationResult, int]:
+    """Verify one stage, using a deterministic failure when execution never qualified."""
+
+    task_id = str(task["task_id"])
+    deterministic_failure = str(runtime.get("deterministic_failure") or "")
+    result: CodexTaskResult = runtime["result"]
+    if deterministic_failure:
+        return _synthetic_failure(deterministic_failure, result.files), 0
+
+    update_web_state(phase="verifier", message=f"Verifier checking {task_id}.")
+    update_subtask_status(
+        task_id,
+        "verifying",
+        attempt_count=attempt_number,
+        detail="The verifier is checking this stage before MIMI proceeds downstream.",
+    )
+    add_activity(
+        "Verifier (API agent)",
+        "Started checking this stage's intermediate artifacts.",
+        status="running",
+        task_id=task_id,
+        attempt=attempt_number,
+    )
+    verification = await _await_with_activity(
+        Runner.run(
+            Verifier_agent,
+            _verification_prompt(
+                _task_text(task),
+                runtime["artifacts"],
+                accepted_context,
+            ),
+        ),
+        agent="Verifier (API agent)",
+        message="Verifier is still running",
+        task_id=task_id,
+        attempt=attempt_number,
+    )
+    verdict = verification.final_output
+    tokens = _agent_tokens(verification)
+    add_activity(
+        "Verifier (API agent)",
+        f"Finished with verdict: {verdict.verdict}.",
+        status="complete" if verdict.verdict == "pass" else "failed",
+        task_id=task_id,
+        attempt=attempt_number,
+    )
+    return verdict, tokens
+
+
+def _attempt_record(
+    runtime: dict[str, Any],
+    *,
+    attempt_number: int,
+    thread_id: str,
+    task_files: list[str],
+) -> dict[str, Any]:
+    execution = runtime.get("execution")
+    artifacts = runtime.get("artifacts")
+    result: CodexTaskResult = runtime["result"]
+    return {
+        "attempt": attempt_number,
+        "thread_id": thread_id,
+        "changed_files": task_files,
+        "summary": result.summary,
+        "entrypoint": result.entrypoint,
+        "tests_run": result.tests_run,
+        "return_code": execution.returncode if execution else None,
+        "stdout": (execution.stdout if execution else "")[-20_000:],
+        "stderr": (
+            execution.stderr if execution else runtime.get("deterministic_failure", "")
+        )[-20_000:],
+        "verdict": None,
+        "artifacts": (
+            {
+                "manifest_path": artifacts.manifest_path,
+                "summary": artifacts.summary,
+                "plots": artifacts.plot_paths,
+                "texts": artifacts.text_paths,
+            }
+            if artifacts
+            else None
+        ),
+        "token_usage": {"verifier": 0},
+    }
+
+
+def _dashboard_attempt(
+    task: dict[str, Any],
+    runtime: dict[str, Any],
+    attempt: dict[str, Any],
+    verdict: VerificationResult,
+) -> None:
+    artifacts = runtime.get("artifacts")
+    artifact_view = (
+        artifact_snapshot(
+            artifacts.plot_paths,
+            artifacts.plot_descriptions,
+            artifacts.text_paths,
+            artifacts.text_descriptions,
+        )
+        if artifacts
+        else {"images": [], "texts": []}
+    )
+    add_coder_run(
+        {
+            "subtask_number": int(task["task_number"]),
+            "attempt": attempt["attempt"],
+            "subtask": _task_text(task),
+            "code_path": attempt["entrypoint"],
+            "coder_output": attempt["summary"],
+            "verifier_output": _verifier_json(verdict),
+            "verifier_verdict": verdict.verdict,
+            "return_code": attempt["return_code"],
+            "stdout": attempt["stdout"],
+            "stderr": attempt["stderr"],
+            "artifacts": artifact_view,
+        }
+    )
+
+
 async def run_pipeline(bundle: MIMIInputBundle) -> Path:
     global ACTIVE_RUN_ROOT
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -427,9 +652,10 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
         )
 
     manifest: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": paths.root.name,
         "status": "running",
+        "workflow": "whole_plan_codex_forward_verification",
         "paths": {
             "inputs": str(paths.inputs),
             "workspace": str(paths.workspace),
@@ -443,12 +669,12 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
             for key in ("planner", "task_breaker", "coder", "verifier", "documentation")
         },
         "tasks": [],
+        "codex_builds": [],
         "token_usage": {
             "total": 0,
             "planning": 0,
             "codex": 0,
             "verifier": 0,
-            "root_cause": 0,
             "documentation": 0,
         },
     }
@@ -458,11 +684,37 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
 
     tasks, active_plan, token_used = await _prepare_tasks(bundle, paths)
     manifest["token_usage"]["planning"] = token_used
+    coding_tasks = _coding_tasks(tasks)
+    for task in tasks:
+        context_only = task.get("is_Coding_Team_required") is not True
+        manifest["tasks"].append(
+            {
+                "task_id": str(task["task_id"]),
+                "task_number": int(task["task_number"]),
+                "status": "context_only" if context_only else "pending",
+                "accepted_files": [],
+                "documentation_tokens": 0,
+                "attempts": [],
+            }
+        )
+        if context_only:
+            add_activity(
+                "MIMI",
+                "Recorded this task as context only; no validation entrypoint is required.",
+                status="complete",
+                task_id=str(task["task_id"]),
+            )
     manifest["token_usage"]["total"] = token_used
     write_run_manifest(paths.manifest, manifest)
     _refresh_deterministic_index(paths)
-    total_coding_tasks = coding_task_count(tasks)
-    set_progress(0, total_coding_tasks, f"0 of {total_coding_tasks} coding tasks complete")
+
+    total_coding_tasks = len(coding_tasks)
+    set_progress(0, total_coding_tasks, f"0 of {total_coding_tasks} coding stages accepted")
+    if not coding_tasks:
+        manifest["status"] = "complete"
+        write_run_manifest(paths.manifest, manifest)
+        update_web_state(phase="complete", message="MIMI completed the context-only plan.")
+        return paths.root
 
     coder_model = selected_model(bundle.model_config, "coder")
     coder_settings = selected_settings(bundle.model_config, "coder")
@@ -470,436 +722,308 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
     if coder_effort in {None, "default", "none", "minimal", "max"}:
         coder_effort = None
 
-    completed: list[dict[str, Any]] = []
-    completed_coding = 0
-    task_index = 0
+    task_results: dict[str, CodexTaskResult] = {}
+    task_files: dict[str, list[str]] = {}
+    latest_runtime: dict[str, dict[str, Any]] = {}
+    failure_counts: dict[str, int] = {}
     revision_count = 0
 
-    async with AsyncCodex(CodexConfig(cwd=str(paths.workspace))) as codex:
-        while task_index < len(tasks):
-            task = tasks[task_index]
-            if task.get("is_Coding_Team_required") is not True:
-                add_activity(
-                    "MIMI",
-                    "Recorded this task as context only; no coding run is required.",
-                    status="complete",
-                    task_id=str(task["task_id"]),
-                )
-                completed.append(task)
-                manifest["tasks"].append(
-                    {"task_id": task["task_id"], "status": "context_only", "attempts": []}
-                )
-                task_index += 1
-                write_run_manifest(paths.manifest, manifest)
-                continue
+    def apply_build(change: CodexPlanChange, start_index: int, kind: str) -> int:
+        """Persist one Codex build and execute every affected validation stage."""
 
-            task_number = int(task["task_number"])
-            task_id = str(task["task_id"])
-            task_text = _task_text(task)
-            set_progress(
-                completed_coding,
-                total_coding_tasks,
-                f"Working on coding task {completed_coding + 1} of {total_coding_tasks}",
+        for result in change.tasks:
+            task_results[result.task_id] = result
+            task_files[result.task_id] = _safe_task_files(paths, result)
+
+        effective_start = start_index
+        changed = set(change.changed_files)
+        for index, earlier in enumerate(coding_tasks[:start_index]):
+            record = _task_record(manifest, str(earlier["task_id"]))
+            if record["status"] == "accepted" and changed.intersection(record["accepted_files"]):
+                effective_start = min(effective_start, index)
+
+        if effective_start < start_index:
+            affected_id = str(coding_tasks[effective_start]["task_id"])
+            add_activity(
+                "MIMI",
+                f"Repair changed accepted source; reverification will restart at {affected_id}.",
+                status="info",
+                task_id=affected_id,
             )
-            update_web_state(phase="coder", message=f"Codex is implementing {task_id}.")
+
+        manifest["codex_builds"].append(
+            {
+                "build": len(manifest["codex_builds"]) + 1,
+                "kind": kind,
+                "thread_id": change.thread_id,
+                "summary": change.summary,
+                "task_ids": [item.task_id for item in change.tasks],
+                "changed_files": change.changed_files,
+                "notes": change.notes,
+                "tokens": change.total_tokens,
+            }
+        )
+
+        for index in range(effective_start, len(coding_tasks)):
+            task = coding_tasks[index]
+            task_id = str(task["task_id"])
+            if task_id not in task_results:
+                raise RuntimeError(f"No Codex validation result is available for {task_id}.")
+            record = _task_record(manifest, task_id)
+            if record["status"] == "accepted":
+                record["status"] = "pending_reverification"
+                record["documentation_tokens"] = 0
+            attempt_number = len(record["attempts"]) + 1
+            task["status"] = "executing"
+            task["attempt_count"] = attempt_number
+            task["max_attempts"] = max(bundle.max_subtask_attempts, attempt_number)
+            runtime = _run_task_stage(
+                paths,
+                task,
+                task_results[task_id],
+                attempt_number=attempt_number,
+            )
+            latest_runtime[task_id] = runtime
+            record["status"] = "awaiting_verification"
+            record["attempts"].append(
+                _attempt_record(
+                    runtime,
+                    attempt_number=attempt_number,
+                    thread_id=change.thread_id,
+                    task_files=task_files.get(task_id, []),
+                )
+            )
             update_subtask_status(
                 task_id,
-                "starting",
+                "awaiting verification",
+                attempt_count=attempt_number,
+                max_attempts=max(bundle.max_subtask_attempts, attempt_number),
+                detail="Intermediate artifacts are ready for forward verification.",
+            )
+
+        manifest["token_usage"]["total"] = token_used
+        write_run_manifest(paths.manifest, manifest)
+        return effective_start
+
+    async with AsyncCodex(CodexConfig(cwd=str(paths.workspace))) as codex:
+        session = CodexPlanSession(
+            codex,
+            paths.workspace,
+            model=coder_model,
+            effort=coder_effort,
+        )
+        update_web_state(
+            phase="coder",
+            message="Codex is implementing the complete ordered plan in one continuous run.",
+        )
+        for task in coding_tasks:
+            update_subtask_status(
+                str(task["task_id"]),
+                "building",
                 attempt_count=0,
                 max_attempts=bundle.max_subtask_attempts,
+                detail="Included in the whole-plan Codex build.",
             )
+        add_activity(
+            "Coder (Codex)",
+            f"Started one whole-plan build covering {len(coding_tasks)} coding stages.",
+            status="running",
+        )
+        initial_change = await _await_with_activity(
+            session.implement_plan(
+                plan=active_plan,
+                tasks=tasks,
+                code_index=_refresh_deterministic_index(paths),
+            ),
+            agent="Coder (Codex)",
+            message="Whole-plan Codex build is still running",
+        )
+        token_used += initial_change.total_tokens
+        manifest["token_usage"]["codex"] += initial_change.total_tokens
+        add_activity(
+            "Coder (Codex)",
+            f"Finished the whole-plan build and changed {len(initial_change.changed_files)} files.",
+            status="complete",
+        )
+        verification_index = apply_build(initial_change, 0, "initial_whole_plan")
 
-            session = CodexTaskSession(
-                codex,
-                paths.workspace,
-                model=coder_model,
-                effort=coder_effort,
+        while verification_index < len(coding_tasks):
+            task = coding_tasks[verification_index]
+            task_id = str(task["task_id"])
+            record = _task_record(manifest, task_id)
+            attempt = record["attempts"][-1]
+            attempt_number = int(attempt["attempt"])
+            set_progress(
+                sum(
+                    _task_record(manifest, str(item["task_id"]))["status"] == "accepted"
+                    for item in coding_tasks
+                ),
+                len(coding_tasks),
+                f"Verifying stage {verification_index + 1} of {len(coding_tasks)}",
             )
-            attempts: list[dict[str, Any]] = []
-            task_changed: set[str] = set()
-            prior_failure = ""
-            verifier_feedback = ""
-            root_cause: dict[str, Any] | None = None
-            accepted = False
+            verdict, verifier_tokens = await _verify_task_stage(
+                task,
+                latest_runtime[task_id],
+                attempt_number=attempt_number,
+                accepted_context=_accepted_context(paths),
+            )
+            token_used += verifier_tokens
+            manifest["token_usage"]["verifier"] += verifier_tokens
+            attempt["verdict"] = verdict.model_dump()
+            attempt["token_usage"]["verifier"] = verifier_tokens
+            _dashboard_attempt(task, latest_runtime[task_id], attempt, verdict)
 
-            for attempt_number in range(1, bundle.max_subtask_attempts + 1):
-                code_index = _refresh_deterministic_index(paths)
-                coding_status = "coding" if attempt_number == 1 else "repairing"
-                task["status"] = coding_status
-                task["attempt_count"] = attempt_number
-                task["max_attempts"] = bundle.max_subtask_attempts
-                update_subtask_status(
-                    task_id,
-                    coding_status,
-                    attempt_count=attempt_number,
-                    max_attempts=bundle.max_subtask_attempts,
-                    detail="Codex is editing the product workspace.",
-                )
-                add_activity(
-                    "Coder (Codex)",
-                    (
-                        "Started implementing the task."
-                        if attempt_number == 1
-                        else "Started a repair using the previous failure evidence."
-                    ),
-                    status="running",
-                    task_id=task_id,
-                    attempt=attempt_number,
-                )
-                if attempt_number == 1:
-                    change = await _await_with_activity(
-                        session.implement(task_text, code_index),
-                        agent="Coder (Codex)",
-                        message="Coder is still running",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-                else:
-                    # Same persistent Codex thread: it can inspect and modify its current code.
-                    change = await _await_with_activity(
-                        session.repair(
-                            task=task_text,
-                            failure=prior_failure,
-                            verifier_feedback=verifier_feedback,
-                            root_cause=root_cause,
-                        ),
-                        agent="Coder (Codex)",
-                        message="Coder repair is still running",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-                token_used += change.total_tokens
-                manifest["token_usage"]["codex"] += change.total_tokens
-                task_changed.update(change.changed_files)
-                attempt_dir = paths.attempt_dir(task_id, attempt_number)
-                update_subtask_status(
-                    task_id,
-                    "executing",
-                    attempt_count=attempt_number,
-                    max_attempts=bundle.max_subtask_attempts,
-                    detail="Running the generated entrypoint and collecting artifacts.",
-                )
-                add_activity(
-                    "Coder (Codex)",
-                    f"Finished editing {len(change.changed_files)} file(s); entrypoint is {change.entrypoint}.",
-                    status="complete",
-                    task_id=task_id,
-                    attempt=attempt_number,
-                )
-                add_activity(
-                    "Execution",
-                    f"Running {change.entrypoint} and collecting its outputs.",
-                    status="running",
-                    task_id=task_id,
-                    attempt=attempt_number,
-                )
-
-                execution = None
-                artifacts = None
-                deterministic_failure = ""
-                try:
-                    entrypoint = resolve_entrypoint(
-                        paths.workspace, change.entrypoint, sorted(task_changed)
-                    )
-                    execution = run_workspace_entrypoint(
-                        paths.workspace, entrypoint, attempt_dir
-                    )
-                    if execution.returncode != 0:
-                        deterministic_failure = (
-                            f"Entrypoint {execution.entrypoint} exited with code "
-                            f"{execution.returncode}. stderr:\n{execution.stderr[-8000:]}"
-                        )
-                    else:
-                        artifacts = collect_artifacts(attempt_dir)
-                except (OSError, ValueError, json.JSONDecodeError, WorkspaceContractError) as exc:
-                    deterministic_failure = f"{type(exc).__name__}: {exc}"
-
-                execution_status = (
-                    f"failed: {deterministic_failure.splitlines()[0]}"
-                    if deterministic_failure
-                    else f"finished with return code {execution.returncode}"
-                )
-                add_activity(
-                    "Execution",
-                    execution_status,
-                    status="failed" if deterministic_failure else "complete",
-                    task_id=task_id,
-                    attempt=attempt_number,
-                )
-
-                if deterministic_failure:
-                    verdict = _synthetic_failure(deterministic_failure, change.changed_files)
-                    verifier_tokens = 0
-                else:
-                    update_web_state(phase="verifier", message=f"Verifier checking {task_id}.")
-                    update_subtask_status(
-                        task_id,
-                        "verifying",
-                        attempt_count=attempt_number,
-                        max_attempts=bundle.max_subtask_attempts,
-                        detail="The API verifier is checking the produced artifacts.",
-                    )
-                    add_activity(
-                        "Verifier (API agent)",
-                        "Started checking the implementation and artifacts.",
-                        status="running",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-                    verification = await _await_with_activity(
-                        Runner.run(Verifier_agent, _verification_prompt(task_text, artifacts)),
-                        agent="Verifier (API agent)",
-                        message="Verifier is still running",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-                    verdict = verification.final_output
-                    verifier_tokens = _agent_tokens(verification)
-                    token_used += verifier_tokens
-                    manifest["token_usage"]["verifier"] += verifier_tokens
-                    add_activity(
-                        "Verifier (API agent)",
-                        f"Finished with verdict: {verdict.verdict}.",
-                        status="complete" if verdict.verdict == "pass" else "failed",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-
-                verifier_feedback = _verifier_json(verdict)
-                prior_failure = deterministic_failure or "\n".join(verdict.failure_modes + verdict.feedback)
-                root_cause = None
-                review_tokens = 0
-                if verdict.verdict != "pass":
-                    # A distinct read-only Codex thread sees the implementation only once a
-                    # concrete failure mode exists.
-                    update_web_state(
-                        phase="root_cause", message=f"Reviewing the failure mode in {task_id}."
-                    )
-                    update_subtask_status(
-                        task_id,
-                        "diagnosing",
-                        attempt_count=attempt_number,
-                        max_attempts=bundle.max_subtask_attempts,
-                        detail="A separate read-only Codex reviewer is diagnosing the failure.",
-                    )
-                    add_activity(
-                        "Root Cause (Codex, read-only)",
-                        "Started diagnosing the failed attempt.",
-                        status="running",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-                    root_cause, review_tokens = await _await_with_activity(
-                        review_root_cause(
-                            codex,
-                            paths.workspace,
-                            model=coder_model,
-                            effort=coder_effort,
-                            task=task_text,
-                            failure=prior_failure,
-                            verifier_feedback=verifier_feedback,
-                            changed_files=sorted(task_changed),
-                            code_index=_refresh_deterministic_index(paths),
-                        ),
-                        agent="Root Cause (Codex, read-only)",
-                        message="Root-cause review is still running",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-                    token_used += review_tokens
-                    manifest["token_usage"]["root_cause"] += review_tokens
-                    add_activity(
-                        "Root Cause (Codex, read-only)",
-                        "Finished diagnosing the failed attempt.",
-                        status="complete",
-                        task_id=task_id,
-                        attempt=attempt_number,
-                    )
-
-                artifact_view = (
-                    artifact_snapshot(
-                        artifacts.plot_paths,
-                        artifacts.plot_descriptions,
-                        artifacts.text_paths,
-                        artifacts.text_descriptions,
-                    )
-                    if artifacts
-                    else {"images": [], "texts": []}
-                )
-                attempt_record = {
-                    "attempt": attempt_number,
-                    "thread_id": change.thread_id,
-                    "changed_files": change.changed_files,
-                    "summary": change.summary,
-                    "entrypoint": change.entrypoint,
-                    "tests_run": change.tests_run,
-                    "return_code": execution.returncode if execution else None,
-                    "stdout": (execution.stdout if execution else "")[-20_000:],
-                    "stderr": (
-                        execution.stderr if execution else deterministic_failure
-                    )[-20_000:],
-                    "verdict": verdict.model_dump(),
-                    "root_cause": root_cause,
-                    "artifacts": (
-                        {
-                            "manifest_path": artifacts.manifest_path,
-                            "summary": artifacts.summary,
-                            "plots": artifacts.plot_paths,
-                            "texts": artifacts.text_paths,
-                        }
-                        if artifacts
-                        else None
-                    ),
-                    "token_usage": {
-                        "codex": change.total_tokens,
-                        "verifier": verifier_tokens,
-                        "root_cause": review_tokens,
-                    },
-                }
-                attempts.append(attempt_record)
-                add_coder_run(
-                    {
-                        "subtask_number": task_number,
-                        "attempt": attempt_number,
-                        "subtask": task_text,
-                        "code_path": change.entrypoint,
-                        "coder_output": change.summary,
-                        "verifier_output": verifier_feedback,
-                        "verifier_verdict": verdict.verdict,
-                        "return_code": attempt_record["return_code"],
-                        "stdout": attempt_record["stdout"],
-                        "stderr": attempt_record["stderr"],
-                        "artifacts": artifact_view,
-                        "root_cause": root_cause,
-                    }
-                )
-
-                if verdict.verdict == "pass":
-                    accepted = True
-                    break
-
-            if accepted:
+            if verdict.verdict == "pass":
                 update_web_state(
                     phase="documentation",
-                    message=f"Documenting accepted changes for {task_id}.",
+                    message=f"Documenting accepted stage {task_id}.",
                 )
                 update_subtask_status(
                     task_id,
                     "documenting",
-                    attempt_count=len(attempts),
-                    max_attempts=bundle.max_subtask_attempts,
-                    detail="The API documentation agent is recording accepted interfaces.",
+                    attempt_count=attempt_number,
+                    detail="Recording hash-bound interfaces before verifying the next stage.",
                 )
                 add_activity(
                     "Documentation (API agent)",
-                    "Started documenting the accepted changes.",
+                    "Started documenting this accepted stage.",
                     status="running",
                     task_id=task_id,
                 )
                 documentation_tokens = await _await_with_activity(
-                    _document_accepted_change(paths, task, sorted(task_changed)),
+                    _document_accepted_change(paths, task, task_files.get(task_id, [])),
                     agent="Documentation (API agent)",
                     message="Documentation is still running",
                     task_id=task_id,
                 )
                 token_used += documentation_tokens
                 manifest["token_usage"]["documentation"] += documentation_tokens
+                record["status"] = "accepted"
+                record["accepted_files"] = task_files.get(task_id, [])
+                record["documentation_tokens"] = documentation_tokens
                 task["status"] = "accepted"
                 update_subtask_status(
                     task_id,
                     "accepted",
-                    attempt_count=len(attempts),
-                    max_attempts=bundle.max_subtask_attempts,
-                    detail="Implementation, execution, verification, and documentation passed.",
+                    attempt_count=attempt_number,
+                    max_attempts=max(bundle.max_subtask_attempts, attempt_number),
+                    detail="Execution, forward verification, and documentation passed.",
                 )
                 add_activity(
                     "Documentation (API agent)",
-                    "Finished documentation; task accepted.",
+                    "Finished documentation; verifier is moving to the next stage.",
                     status="complete",
                     task_id=task_id,
                 )
-                completed.append(task)
-                completed_coding += 1
-                manifest["tasks"].append(
-                    {
-                        "task_id": task_id,
-                        "status": "accepted",
-                        "thread_id": attempts[-1]["thread_id"],
-                        "changed_files": sorted(task_changed),
-                        "documentation_tokens": documentation_tokens,
-                        "attempts": attempts,
-                    }
+                verification_index += 1
+                accepted_count = sum(
+                    _task_record(manifest, str(item["task_id"]))["status"] == "accepted"
+                    for item in coding_tasks
+                )
+                set_progress(
+                    accepted_count,
+                    len(coding_tasks),
+                    f"{accepted_count} of {len(coding_tasks)} coding stages accepted",
                 )
                 manifest["token_usage"]["total"] = token_used
                 write_run_manifest(paths.manifest, manifest)
-                task_index += 1
-                set_progress(
-                    completed_coding,
-                    total_coding_tasks,
-                    f"{completed_coding} of {total_coding_tasks} coding tasks complete",
+                continue
+
+            failure_counts[task_id] = failure_counts.get(task_id, 0) + 1
+            record["status"] = "flagged"
+            task["status"] = "flagged"
+            failure = str(latest_runtime[task_id].get("deterministic_failure") or "").strip()
+            if not failure:
+                failure = "\n".join(verdict.failure_modes + verdict.feedback)
+            verifier_feedback = _verifier_json(verdict)
+            update_subtask_status(
+                task_id,
+                "flagged",
+                attempt_count=attempt_number,
+                max_attempts=max(bundle.max_subtask_attempts, attempt_number),
+                detail="Verification stopped here; Codex will repair this stage and downstream work.",
+            )
+
+            if failure_counts[task_id] < bundle.max_subtask_attempts:
+                remaining = coding_tasks[verification_index:]
+                for remaining_task in remaining:
+                    update_subtask_status(
+                        str(remaining_task["task_id"]),
+                        "repairing",
+                        detail=f"Regenerating from failed stage {task_id}.",
+                    )
+                update_web_state(
+                    phase="coder",
+                    message=f"Codex is repairing {task_id} and all downstream stages.",
                 )
+                add_activity(
+                    "Coder (Codex)",
+                    f"Started suffix repair from {task_id}; accepted upstream stages are preserved.",
+                    status="running",
+                    task_id=task_id,
+                    attempt=attempt_number + 1,
+                )
+                repair = await _await_with_activity(
+                    session.repair_from_task(
+                        plan=active_plan,
+                        remaining_tasks=remaining,
+                        failure=failure,
+                        verifier_feedback=verifier_feedback,
+                        accepted_context=_accepted_context(paths),
+                        code_index=_refresh_deterministic_index(paths),
+                    ),
+                    agent="Coder (Codex)",
+                    message="Codex suffix repair is still running",
+                    task_id=task_id,
+                    attempt=attempt_number + 1,
+                )
+                token_used += repair.total_tokens
+                manifest["token_usage"]["codex"] += repair.total_tokens
+                add_activity(
+                    "Coder (Codex)",
+                    "Finished the suffix repair; affected intermediate stages will run again.",
+                    status="complete",
+                    task_id=task_id,
+                    attempt=attempt_number + 1,
+                )
+                verification_index = apply_build(repair, verification_index, "suffix_repair")
                 continue
 
             if revision_count >= bundle.max_plan_revisions:
-                task["status"] = "failed"
+                record["status"] = "failed"
+                manifest["status"] = "failed"
+                manifest["token_usage"]["total"] = token_used
+                write_run_manifest(paths.manifest, manifest)
                 update_subtask_status(
                     task_id,
                     "failed",
-                    attempt_count=len(attempts),
-                    max_attempts=bundle.max_subtask_attempts,
-                    detail="The task exhausted its attempts and plan revisions.",
+                    attempt_count=attempt_number,
+                    detail="The stage exhausted repair attempts and plan revisions.",
                 )
-                add_activity(
-                    "MIMI",
-                    "Task failed after exhausting its attempts and plan revisions.",
-                    status="failed",
-                    task_id=task_id,
-                )
-                manifest["status"] = "failed"
-                manifest["token_usage"]["total"] = token_used
-                manifest["tasks"].append(
-                    {"task_id": task_id, "status": "failed", "attempts": attempts}
-                )
-                write_run_manifest(paths.manifest, manifest)
                 raise RuntimeError(
-                    f"{task_id} failed after {bundle.max_subtask_attempts} attempts and "
-                    f"{bundle.max_plan_revisions} plan revisions."
+                    f"{task_id} failed after {bundle.max_subtask_attempts} verification failures "
+                    f"and {bundle.max_plan_revisions} plan revisions."
                 )
 
             revision_count += 1
-            task["status"] = "replanning"
-            update_subtask_status(
-                task_id,
-                "replanning",
-                attempt_count=len(attempts),
-                max_attempts=bundle.max_subtask_attempts,
-                detail="The API planner is revising this task and the remaining plan.",
+            task_number = int(task["task_number"])
+            full_task_index = next(
+                index for index, item in enumerate(tasks) if str(item["task_id"]) == task_id
             )
-            add_activity(
-                "Planner (API agent)",
-                f"Started plan revision {revision_count} after the failed task.",
-                status="running",
-                task_id=task_id,
-            )
-            manifest["tasks"].append(
-                {
-                    "task_id": task_id,
-                    "status": "superseded_after_failure",
-                    "revision": revision_count,
-                    "attempts": attempts,
-                }
-            )
-            manifest["token_usage"]["total"] = token_used
-            write_run_manifest(paths.manifest, manifest)
             failure_report = build_failure_report(
                 subtask_number=task_number,
-                subtask_text=task_text,
-                attempts=attempts,
-                completed_tasks=completed,
-                remaining_tasks=tasks[task_index:],
+                subtask_text=_task_text(task),
+                attempts=record["attempts"],
+                completed_tasks=tasks[:full_task_index],
+                remaining_tasks=tasks[full_task_index:],
             )
             (paths.reports / f"failure_revision_{revision_count}.json").write_text(
                 failure_report, encoding="utf-8", newline="\n"
+            )
+            update_subtask_status(
+                task_id,
+                "replanning",
+                detail="The planner is revising this stage and the downstream continuation.",
             )
             revision = await _await_with_activity(
                 revise_plan_continuation(
@@ -913,24 +1037,13 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
                 message="Planner recovery is still running",
                 task_id=task_id,
             )
-            token_used += _agent_tokens(revision)
-            manifest["token_usage"]["planning"] += _agent_tokens(revision)
+            revision_tokens = _agent_tokens(revision)
+            token_used += revision_tokens
+            manifest["token_usage"]["planning"] += revision_tokens
             revised_plan = str(revision.final_output)
             active_plan += f"\n\n--- REVISION {revision_count} ---\n{revised_plan}"
             append_planner_output(f"Revision {revision_count}", revised_plan)
-            add_activity(
-                "Planner (API agent)",
-                f"Finished plan revision {revision_count}.",
-                status="complete",
-                task_id=task_id,
-            )
 
-            add_activity(
-                "Task Breaker (API agent)",
-                "Started creating replacement subtasks for the revised plan.",
-                status="running",
-                task_id=task_id,
-            )
             replacement = await _await_with_activity(
                 run_task_breaker_on_plan(
                     "Create only replacement tasks for this revised continuation.\n\n"
@@ -942,8 +1055,9 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
                 message="Task Breaker recovery is still running",
                 task_id=task_id,
             )
-            token_used += _agent_tokens(replacement)
-            manifest["token_usage"]["planning"] += _agent_tokens(replacement)
+            replacement_tokens = _agent_tokens(replacement)
+            token_used += replacement_tokens
+            manifest["token_usage"]["planning"] += replacement_tokens
             raw_replacements = replacement.final_output.model_dump().get("tasks", [])
             if not raw_replacements:
                 raise RuntimeError("Task Breaker returned no replacement tasks.")
@@ -953,32 +1067,76 @@ async def run_pipeline(bundle: MIMIInputBundle) -> Path:
                 prefix=f"revision_{revision_count}",
                 start_number=task_number,
             )
-            add_activity(
-                "Task Breaker (API agent)",
-                f"Created {len(replacement_tasks)} replacement tasks.",
-                status="complete",
-                task_id=task_id,
-            )
-            tasks = tasks[:task_index] + replacement_tasks
-            total_coding_tasks = completed_coding + coding_task_count(tasks[task_index:])
+            replacement_coding = _coding_tasks(replacement_tasks)
+            if not replacement_coding:
+                raise RuntimeError("The revised continuation contains no coding task.")
+
+            for superseded in coding_tasks[verification_index:]:
+                _task_record(manifest, str(superseded["task_id"]))["status"] = "superseded"
+            tasks = tasks[:full_task_index] + replacement_tasks
+            coding_tasks = coding_tasks[:verification_index] + replacement_coding
+            for replacement_task in replacement_tasks:
+                manifest["tasks"].append(
+                    {
+                        "task_id": str(replacement_task["task_id"]),
+                        "task_number": int(replacement_task["task_number"]),
+                        "status": (
+                            "pending"
+                            if replacement_task.get("is_Coding_Team_required") is True
+                            else "context_only"
+                        ),
+                        "accepted_files": [],
+                        "documentation_tokens": 0,
+                        "attempts": [],
+                    }
+                )
             write_json(paths.tasks / "task_manifest.json", {"tasks": tasks})
             update_web_state(
                 task_breaker={
                     "raw": json.dumps({"tasks": tasks}, indent=2, ensure_ascii=False),
                     "subtasks": task_breaker_payload_to_subtasks({"tasks": tasks}),
                 },
-                message=f"Replaced {task_id} and downstream tasks after revision.",
+                message=f"Replaced {task_id} and its downstream stages after plan revision.",
+            )
+            failure_counts = {
+                key: value
+                for key, value in failure_counts.items()
+                if key in {str(item["task_id"]) for item in coding_tasks[:verification_index]}
+            }
+            revised_change = await _await_with_activity(
+                session.repair_from_task(
+                    plan=active_plan,
+                    remaining_tasks=replacement_tasks,
+                    failure=failure,
+                    verifier_feedback=verifier_feedback,
+                    accepted_context=_accepted_context(paths),
+                    code_index=_refresh_deterministic_index(paths),
+                ),
+                agent="Coder (Codex)",
+                message="Codex revised-continuation build is still running",
+                task_id=str(replacement_coding[0]["task_id"]),
+            )
+            token_used += revised_change.total_tokens
+            manifest["token_usage"]["codex"] += revised_change.total_tokens
+            verification_index = apply_build(
+                revised_change, verification_index, "revised_continuation"
             )
 
+    accepted_count = sum(
+        _task_record(manifest, str(task["task_id"]))["status"] == "accepted"
+        for task in coding_tasks
+    )
     manifest["status"] = "complete"
     manifest["token_usage"]["total"] = token_used
     write_run_manifest(paths.manifest, manifest)
     update_web_state(
         phase="complete",
-        message=f"MIMI completed {completed_coding} coding tasks.",
+        message=f"MIMI completed and verified {accepted_count} coding stages.",
         output_dir=str(paths.root),
     )
-    add_activity("MIMI", f"Completed {completed_coding} coding tasks.", status="complete")
+    add_activity(
+        "MIMI", f"Completed and verified {accepted_count} coding stages.", status="complete"
+    )
     return paths.root
 
 

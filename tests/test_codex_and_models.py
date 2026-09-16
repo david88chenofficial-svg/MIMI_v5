@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from MIMI_codex import CodexTaskSession
+from MIMI_codex import CodexPlanSession, PLAN_CODING_OUTPUT_SCHEMA
 from MIMI_models import (
     MODEL_CATALOG,
     MODEL_DEFAULTS,
@@ -64,27 +64,79 @@ class _FakeCodex:
         return self.thread
 
 
+class _WholePlanThread(_FakeThread):
+    async def run(self, prompt, **kwargs):
+        self.run_count += 1
+        if not hasattr(self, "schemas"):
+            self.schemas = []
+        self.schemas.append(kwargs.get("output_schema"))
+        task_ids = ["TASK_001", "TASK_002"] if self.run_count == 1 else ["TASK_002"]
+        for task_id in task_ids:
+            filename = f"{task_id.lower()}.py"
+            (self.workspace / filename).write_text("VALUE = 1\n", encoding="utf-8")
+        return _Result(
+            json.dumps(
+                {
+                    "summary": f"plan change {self.run_count}",
+                    "tasks": [
+                        {
+                            "task_id": task_id,
+                            "summary": f"implemented {task_id}",
+                            "entrypoint": f"{task_id.lower()}.py",
+                            "files": [f"{task_id.lower()}.py"],
+                            "tests_run": [],
+                            "notes": [],
+                        }
+                        for task_id in task_ids
+                    ],
+                    "notes": [],
+                }
+            )
+        )
+
+
+class _WholePlanCodex(_FakeCodex):
+    def __init__(self, workspace: Path):
+        self.thread = _WholePlanThread(workspace)
+        self.start_count = 0
+
+
 class CodexAndModelTests(unittest.IsolatedAsyncioTestCase):
-    async def test_repair_reuses_the_same_codex_thread(self):
+    async def test_whole_plan_and_suffix_repair_share_one_thread(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
-            codex = _FakeCodex(workspace)
-            session = CodexTaskSession(
-                codex,
-                workspace,
-                model="gpt-5.6-sol",
-                effort="medium",
+            codex = _WholePlanCodex(workspace)
+            session = CodexPlanSession(codex, workspace, model="gpt-5.6-sol")
+            tasks = [
+                {
+                    "task_id": "TASK_001",
+                    "instructions": "context only",
+                    "is_Coding_Team_required": False,
+                },
+                {
+                    "task_id": "TASK_002",
+                    "instructions": "second",
+                    "is_Coding_Team_required": True,
+                },
+            ]
+
+            initial = await session.implement_plan(plan="complete plan", tasks=tasks, code_index={})
+            repair = await session.repair_from_task(
+                plan="complete plan",
+                remaining_tasks=tasks[1:],
+                failure="second stage failed",
+                verifier_feedback="wrong sign",
+                accepted_context="first stage accepted",
+                code_index={},
             )
-            first = await session.implement("create product", {"files": []})
-            second = await session.repair(
-                task="create product",
-                failure="value was wrong",
-                verifier_feedback="expected two",
-            )
+
             self.assertEqual(codex.start_count, 1)
-            self.assertEqual(first.thread_id, second.thread_id)
-            self.assertEqual(second.total_tokens, 15)
-            self.assertEqual(second.changed_files, ["product.py"])
+            self.assertEqual(initial.thread_id, repair.thread_id)
+            self.assertEqual([item.task_id for item in initial.tasks], ["TASK_002"])
+            self.assertEqual([item.task_id for item in repair.tasks], ["TASK_002"])
+            self.assertTrue(
+                all(schema is PLAN_CODING_OUTPUT_SCHEMA for schema in codex.thread.schemas)
+            )
 
     async def test_legacy_documentation_model_name_migrates(self):
         config = AgentModelConfig(
@@ -95,11 +147,12 @@ class CodexAndModelTests(unittest.IsolatedAsyncioTestCase):
         )
         config.validate()
         self.assertEqual(config.models, {"documentation": "gpt-5.6-luna"})
-        self.assertEqual(selected_model(config, "coder"), "gpt-5.6-sol")
+        self.assertEqual(selected_model(config, "coder"), "gpt-5.6-luna")
 
     async def test_dashboard_separates_api_and_codex_model_options(self):
         codex_models = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
         api_models = codex_models | {
+            "gpt-5-mini",
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
@@ -115,12 +168,12 @@ class CodexAndModelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "codex runtime"):
             AgentModelConfig(models={"coder": "gpt-5.4-mini"}).validate()
 
-    async def test_agent_defaults_use_role_appropriate_gpt_5_6_models(self):
-        self.assertEqual(MODEL_DEFAULTS["planner"], "gpt-5.6-sol")
-        self.assertEqual(MODEL_DEFAULTS["task_breaker"], "gpt-5.6-terra")
-        self.assertEqual(MODEL_DEFAULTS["coder"], "gpt-5.6-sol")
-        self.assertEqual(MODEL_DEFAULTS["verifier"], "gpt-5.6-sol")
-        self.assertEqual(MODEL_DEFAULTS["documentation"], "gpt-5.6-luna")
+    async def test_agent_defaults_use_mini_and_luna(self):
+        self.assertEqual(MODEL_DEFAULTS["planner"], "gpt-5-mini")
+        self.assertEqual(MODEL_DEFAULTS["task_breaker"], "gpt-5-mini")
+        self.assertEqual(MODEL_DEFAULTS["coder"], "gpt-5.6-luna")
+        self.assertEqual(MODEL_DEFAULTS["verifier"], "gpt-5-mini")
+        self.assertEqual(MODEL_DEFAULTS["documentation"], "gpt-5-mini")
 
 
 if __name__ == "__main__":

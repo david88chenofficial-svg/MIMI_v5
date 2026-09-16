@@ -16,11 +16,11 @@ let literatureAbandoning = false;
 let literatureJobId = null;
 let literatureRequestStarted = false;
 const defaultModels = {
-  planner: "gpt-5.6-sol",
-  task_breaker: "gpt-5.6-terra",
-  coder: "gpt-5.6-sol",
-  verifier: "gpt-5.6-sol",
-  documentation: "gpt-5.6-luna",
+  planner: "gpt-5-mini",
+  task_breaker: "gpt-5-mini",
+  coder: "gpt-5.6-luna",
+  verifier: "gpt-5-mini",
+  documentation: "gpt-5-mini",
 };
 const defaultAgentSettings = {
   planner: {
@@ -442,12 +442,11 @@ function conciseStatus(state) {
     plan_resume: "Loading plan",
     task_breaker: "Creating subtasks",
     resume: "Loading subtasks",
-    coder: "Writing code",
-    execution: "Running generated program",
+    coder: "Building or repairing the complete plan",
+    execution: "Running stage validators",
     collecting: "Collecting outputs",
     verifier: "Checking results",
     documentation: "Updating documentation",
-    root_cause: "Diagnosing root cause",
     planner_revision: "Revising plan",
     task_breaker_revision: "Updating subtasks",
     integration: "Integrating accepted modules",
@@ -1182,12 +1181,6 @@ function renderCoderAttempt(run) {
           <h3>Verifier</h3>
           <pre class="txt-block">${escapeHtml(run.verifier_output || "No verifier output.")}</pre>
         </section>
-        ${run.root_cause ? `
-          <section class="artifact-section">
-            <h3>Read-only root-cause review</h3>
-            <pre class="txt-block">${escapeHtml(JSON.stringify(run.root_cause, null, 2))}</pre>
-          </section>
-        ` : ""}
         <section class="artifact-section">
           <h3>Plots</h3>
           ${renderPlots(artifacts.images || [])}

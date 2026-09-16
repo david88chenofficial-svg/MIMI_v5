@@ -20,23 +20,24 @@ Agents SDK is used for planning, task shaping, documentation, and verification.
 
 - Planner defines scientific deliverables and acceptance criteria, not paths.
 - Task Breaker returns structured task objects; Python persists exact task files.
-- Codex edits and tests the real product workspace. One persistent Codex thread is
-  used per task, including retries.
-- Verifier returns a structured `pass`, `fail`, or `inconclusive` verdict.
-- Documentation describes only changed source files from an accepted task. Its
+- One persistent Codex thread receives the complete ordered plan and implements
+  the product as one coherent build. It also creates one small validation
+  entrypoint per coding stage so intermediate results remain inspectable.
+- Python runs all stage entrypoints in isolated artifact directories. The Verifier
+  then checks them from the first stage forward and returns a structured `pass`,
+  `fail`, or `inconclusive` verdict.
+- Documentation is recorded immediately after each stage passes. Its
   records are attached to file hashes, so stale documentation is automatically
   excluded after later edits.
-- A separate read-only Codex review is started only after a failure mode exists.
+- Verification stops at the first failed stage. The failure, accepted hash-valid
+  documentation, and failed/downstream task contracts return to the same Codex
+  thread for a suffix repair. Accepted upstream stages are preserved.
+- If a repair changes an accepted source file, MIMI automatically restarts
+  verification at the earliest affected stage.
 
-The two intentional full-code access points are:
-
-1. Repair: the same task thread may inspect the current implementation after a
-   failed execution or verifier verdict.
-2. Root cause: a separate read-only thread inspects relevant files after a failure
-   mode is recorded.
-
-During an ordinary next task, Codex receives the compact `code_index.json` and opens
-only relevant files. This keeps context usage bounded while preserving ownership.
+Codex uses the compact `code_index.json` as its navigation layer. Product logic
+belongs in shared modules; stage entrypoints are demonstrations and validators,
+not duplicate implementations.
 
 ## Run layout
 
@@ -55,6 +56,16 @@ Generated demonstrations run from the attempt artifact directory with the produc
 workspace on `PYTHONPATH`. Artifact paths must remain inside that attempt directory;
 credentials are removed from the subprocess environment.
 
+The normal runtime order is:
+
+```text
+Planner -> Task Breaker -> one whole-plan Codex build
+        -> execute all stage entrypoints
+        -> verify stage 1, document it, verify stage 2, ...
+        -> on failure: repair and regenerate the failed/downstream suffix
+        -> resume verification at the earliest affected stage
+```
+
 ## Progressive browser interface
 
 Start the normal file workflow:
@@ -66,11 +77,10 @@ python .\lauch_MIMI.py
 MIMI opens with a Level 1, Level 2, or Level 3 choice. Only the file drop targets
 needed by the selected level are then shown.
 
-The **Models** panel offers the current GPT-5.6 family only: Sol for maximum
-capability, Terra for balanced everyday work, and Luna for fast, economical
-structured work. MIMI defaults the planner, coder, and verifier to Sol, the task
-breaker to Terra, and documentation to Luna. These choices are valid for the
-Coder's ChatGPT-authenticated Codex runtime as well as the API-backed agents.
+MIMI defaults its API-backed Planner, Task Breaker, Verifier, Documentation, and
+literature extraction to `gpt-5-mini`. The whole-plan Coder defaults to
+`gpt-5.6-luna` through the ChatGPT-authenticated Codex runtime. The **Models**
+panel can still override individual workflow-agent models.
 
 At Level 1, literature can be added without using PowerShell: drag one or more
 PDFs into **Literature PDFs**, click **Extract into Background**, and wait for the

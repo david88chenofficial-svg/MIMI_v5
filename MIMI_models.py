@@ -31,14 +31,14 @@ AGENT_MODEL_TARGETS = {
 }
 MODEL_DEFAULTS = {
     **{key: agent.model for key, agent in AGENT_MODEL_TARGETS.items()},
-    "coder": "gpt-5.6-sol",
+    "coder": "gpt-5.6-luna",
 }
 
 AGENT_CAPABILITY_REQUIREMENTS = {
     "planner": {
         "runtime": "responses",
-        "capabilities": ["responses", "streaming", "image_input", "web_search"],
-        "tools": ["web_search"],
+        "capabilities": ["responses", "streaming", "image_input"],
+        "tools": [],
     },
     "task_breaker": {
         "runtime": "responses",
@@ -56,10 +56,9 @@ AGENT_CAPABILITY_REQUIREMENTS = {
             "responses",
             "streaming",
             "image_input",
-            "web_search",
             "structured_output",
         ],
-        "tools": ["web_search"],
+        "tools": [],
     },
     "documentation": {
         "runtime": "responses",

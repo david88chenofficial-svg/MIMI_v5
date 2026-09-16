@@ -6,7 +6,7 @@ the Codex SDK against the real run workspace (see :mod:`MIMI_codex`).
 
 from typing import Literal
 
-from agents import Agent, AgentOutputSchema, ModelSettings, WebSearchTool
+from agents import Agent, AgentOutputSchema, ModelSettings
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, Field
 
@@ -97,8 +97,7 @@ vague phrases such as "standard method" unless the exact procedure is also given
 Choose explicit defaults instead of asking follow-up questions. Keep notation and
 conventions consistent. Write mathematical symbols in LaTeX form.
 """,
-    tools=[WebSearchTool()],
-    model="gpt-5.6-sol",
+    model="gpt-5-mini",
     model_settings=ModelSettings(reasoning=Reasoning(effort="medium"), verbosity="high"),
 )
 
@@ -118,7 +117,7 @@ as not requiring the coding team and retain its useful context in
 insights_from_overview. For revisions, preserve completed work and describe only
 the replacement or continuation tasks that remain.
 """,
-    model="gpt-5.6-terra",
+    model="gpt-5-mini",
     output_type=AgentOutputSchema(BrokenTask, strict_json_schema=True),
     model_settings=ModelSettings(reasoning=Reasoning(effort="medium"), verbosity="low"),
 )
@@ -143,7 +142,7 @@ Prefer compact operational knowledge over line-by-line narration. The runtime wi
 verify paths and hashes before accepting your records, so never describe files that
 were not supplied.
 """,
-    model="gpt-5.6-luna",
+    model="gpt-5-mini",
     output_type=AgentOutputSchema(DocumentationBundle, strict_json_schema=True),
     model_settings=ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
 )
@@ -152,10 +151,12 @@ were not supplied.
 Verifier_agent = Agent(
     name="Verifier",
     instructions="""
-You are MIMI's independent physics and numerical verifier. You receive one task
-contract and either its produced artifacts or a deterministic execution failure.
-Judge the evidence; do not edit code and do not infer a pass from successful
-execution alone.
+You are MIMI's independent physics and numerical verifier. MIMI verifies an
+ordered implementation from the first stage forward. You receive the current
+stage contract, its produced artifacts or deterministic execution failure, and
+possibly hash-valid documentation from already accepted upstream stages. Judge
+only whether the current stage may be accepted so verification can move forward.
+Do not edit code and do not infer a pass from successful execution alone.
 
 Check dimensional consistency, signs, scaling, orders of magnitude, bounds,
 symmetry, monotonicity, limiting behaviour, convergence, NaN/Inf, and agreement
@@ -168,8 +169,7 @@ Record detected failure modes separately. List workspace-relative files only whe
 the evidence identifies them; do not invent paths. Mathematical symbols must use
 LaTeX form rather than Unicode symbols.
 """,
-    tools=[WebSearchTool()],
-    model="gpt-5.6-sol",
+    model="gpt-5-mini",
     output_type=AgentOutputSchema(VerificationResult, strict_json_schema=True),
     model_settings=ModelSettings(reasoning=Reasoning(effort="high"), verbosity="low"),
 )

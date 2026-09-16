@@ -185,15 +185,16 @@
             </span>
           </summary>
           <p class="review-help">
-            Every attempt runs Coder, executes the result, and then runs Verifier. A failed attempt
-            also receives a read-only root-cause review before the next repair. After all attempts
-            fail, MIMI may revise the plan and create replacement tasks.
+            Codex builds the complete ordered plan once and creates intermediate outputs for every
+            coding stage. Verifier checks those stages from first to last, documenting each pass.
+            A failure stops the sequence and sends the failed and downstream stages back to the same
+            Codex thread. After all repair rounds fail, MIMI may revise the remaining plan.
           </p>
           <div class="review-settings-grid">
             <label class="number-control" for="max-subtask-attempts">
-              <span>Review attempts per task</span>
+              <span>Failure rounds per stage</span>
               <input id="max-subtask-attempts" type="number" min="1" max="20" step="1" value="3">
-              <small>Maximum Coder → execution → Verifier cycles for each coding task.</small>
+              <small>Maximum failed verification rounds before the remaining plan is revised.</small>
             </label>
             <label class="number-control" for="max-plan-revisions">
               <span>Plan recovery revisions</span>
@@ -211,9 +212,8 @@
           </summary>
           <p class="model-help">
             Planner, Task Breaker, Verifier, and Documentation can use compatible Responses API
-            models. Coder and the read-only failure reviewer use Codex-compatible models. At Level
-            3, Planner and Task Breaker are skipped initially but can run if a failed task requires
-            plan recovery.
+            models. The whole-plan Coder uses a Codex-compatible model. At Level 3, Planner and
+            Task Breaker are skipped initially but can run if a failed stage requires plan recovery.
           </p>
           <div class="model-grid">
             <fieldset class="agent-settings" data-agent="planner">
@@ -229,7 +229,7 @@
               <label>Verbosity <select data-setting-agent="task_breaker" data-setting-name="verbosity"></select></label>
             </fieldset>
             <fieldset class="agent-settings" data-agent="coder">
-              <legend>Coder (Codex)</legend>
+              <legend>Whole-plan Coder (Codex)</legend>
               <label>Model <select data-model-agent="coder"></select></label>
               <label>Reasoning <select data-setting-agent="coder" data-setting-name="reasoning_effort"></select></label>
               <label>Verbosity <select data-setting-agent="coder" data-setting-name="verbosity"></select></label>
